@@ -346,7 +346,7 @@ const ControlPanel: React.FC<ControlPanelProps> = ({
               ].map((opt) => (
                 <button
                   key={opt.value}
-                  className={`speed-btn${moveMode === opt.mode ? ' active' : ''}`}
+                  className={`speed-btn${(moveMode === opt.mode && customSpeedKmh == null && speedMinKmh == null && speedMaxKmh == null) ? ' active' : ''}`}
                   onClick={() => {
                     onMoveModeChange(opt.mode);
                     onSpeedChange(opt.value);

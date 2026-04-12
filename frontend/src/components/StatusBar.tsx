@@ -47,6 +47,7 @@ const StatusBar: React.FC<StatusBarProps> = ({
   onRestore,
 }) => {
   const [cooldownDisplay, setCooldownDisplay] = useState(cooldown);
+  const [copied, setCopied] = useState(false);
 
   useEffect(() => {
     setCooldownDisplay(cooldown);
@@ -131,6 +132,33 @@ const StatusBar: React.FC<StatusBarProps> = ({
               <path d="M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z" />
             </svg>
             <span>{currentPosition.lat.toFixed(6)}, {currentPosition.lng.toFixed(6)}</span>
+            <button
+              onClick={() => {
+                const txt = `${currentPosition.lat.toFixed(6)}, ${currentPosition.lng.toFixed(6)}`;
+                navigator.clipboard.writeText(txt).then(
+                  () => setCopied(true),
+                  () => setCopied(false),
+                );
+                setTimeout(() => setCopied(false), 1500);
+              }}
+              title="複製座標"
+              style={{
+                background: 'transparent', border: 'none', cursor: 'pointer',
+                padding: '0 4px', color: copied ? '#4caf50' : 'rgba(255,255,255,0.6)',
+                display: 'inline-flex', alignItems: 'center',
+              }}
+            >
+              {copied ? (
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3">
+                  <polyline points="20 6 9 17 4 12" />
+                </svg>
+              ) : (
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <rect x="9" y="9" width="13" height="13" rx="2" />
+                  <path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1" />
+                </svg>
+              )}
+            </button>
           </div>
           <div style={{ width: 1, height: 14, background: '#333' }} />
         </>

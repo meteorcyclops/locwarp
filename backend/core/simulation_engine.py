@@ -136,6 +136,28 @@ class SimulationEngine:
         """Instantly move to a coordinate."""
         return await self._teleport_handler.teleport(lat, lng)
 
+    async def _run_handler(self, coro, label: str) -> None:
+        """Run a simulation handler coroutine with uniform cleanup.
+        Any exception or cancellation forces the engine back to IDLE and
+        notifies the frontend, preventing UI desync after a crash / drop."""
+        self._active_task = asyncio.create_task(coro)
+        try:
+            await self._active_task
+        except asyncio.CancelledError:
+            logger.info("%s cancelled", label)
+        except Exception:
+            logger.exception("%s failed unexpectedly", label)
+        finally:
+            self._active_task = None
+            # Force state back to IDLE if a handler crashed / was cancelled
+            # mid-flight so the UI doesn't stay stuck showing "navigating".
+            if self.state not in (SimulationState.IDLE, SimulationState.DISCONNECTED):
+                self.state = SimulationState.IDLE
+                try:
+                    await self._emit("state_change", {"state": self.state.value})
+                except Exception:
+                    logger.exception("Failed to emit idle state_change after %s", label)
+
     async def navigate(
         self, dest: Coordinate, mode: MovementMode,
         speed_kmh: float | None = None,
@@ -146,18 +168,13 @@ class SimulationEngine:
         await self._ensure_stopped()
         self._stop_event.clear()
         self._pause_event.set()
-        self._active_task = asyncio.create_task(
+        await self._run_handler(
             self._navigator.navigate_to(
                 dest, mode, speed_kmh=speed_kmh,
                 speed_min_kmh=speed_min_kmh, speed_max_kmh=speed_max_kmh,
-            )
+            ),
+            "Navigate",
         )
-        try:
-            await self._active_task
-        except asyncio.CancelledError:
-            logger.info("Navigation task cancelled")
-        finally:
-            self._active_task = None
 
     async def start_loop(
         self,
@@ -171,18 +188,13 @@ class SimulationEngine:
         await self._ensure_stopped()
         self._stop_event.clear()
         self._pause_event.set()
-        self._active_task = asyncio.create_task(
+        await self._run_handler(
             self._looper.start_loop(
                 waypoints, mode, speed_kmh=speed_kmh,
                 speed_min_kmh=speed_min_kmh, speed_max_kmh=speed_max_kmh,
-            )
+            ),
+            "Loop",
         )
-        try:
-            await self._active_task
-        except asyncio.CancelledError:
-            logger.info("Loop task cancelled")
-        finally:
-            self._active_task = None
 
     async def joystick_start(self, mode: MovementMode) -> None:
         """Activate joystick mode."""
@@ -213,18 +225,13 @@ class SimulationEngine:
         await self._ensure_stopped()
         self._stop_event.clear()
         self._pause_event.set()
-        self._active_task = asyncio.create_task(
+        await self._run_handler(
             self._multi_stop.start(
                 waypoints, mode, stop_duration, loop, speed_kmh=speed_kmh,
                 speed_min_kmh=speed_min_kmh, speed_max_kmh=speed_max_kmh,
-            )
+            ),
+            "Multi-stop",
         )
-        try:
-            await self._active_task
-        except asyncio.CancelledError:
-            logger.info("Multi-stop task cancelled")
-        finally:
-            self._active_task = None
 
     async def random_walk(
         self,
@@ -241,24 +248,13 @@ class SimulationEngine:
         await self._ensure_stopped()
         self._stop_event.clear()
         self._pause_event.set()
-        self._active_task = asyncio.create_task(
+        await self._run_handler(
             self._random_walk.start(
                 center, radius_m, mode, min_pause, max_pause, speed_kmh=speed_kmh,
                 speed_min_kmh=speed_min_kmh, speed_max_kmh=speed_max_kmh,
-            )
+            ),
+            "Random walk",
         )
-        try:
-            await self._active_task
-        except asyncio.CancelledError:
-            logger.info("Random walk task cancelled")
-        except Exception:
-            logger.exception("Random walk task failed unexpectedly")
-            # Ensure we return to IDLE state
-            if self.state not in (SimulationState.IDLE, SimulationState.DISCONNECTED):
-                self.state = SimulationState.IDLE
-                await self._emit("state_change", {"state": self.state.value})
-        finally:
-            self._active_task = None
 
     async def pause(self) -> None:
         """Pause the active movement.
