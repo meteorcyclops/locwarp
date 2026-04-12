@@ -391,8 +391,32 @@ async def wifi_tunnel_status():
 
 @router.post("/wifi/tunnel/stop")
 async def wifi_tunnel_stop():
-    """Stop the WiFi tunnel subprocess."""
+    """Stop the WiFi tunnel subprocess and clean up any network-based
+    device connections that were routed through it."""
     global _tunnel_proc, _tunnel_info
+
+    # Disconnect any devices connected via the WiFi tunnel BEFORE killing
+    # the tunnel process — once the tunnel is gone the RSD socket is dead
+    # and subsequent calls throw "not connected" / WinError 1231.
+    from main import app_state
+    dm = _dm()
+    try:
+        udids = [
+            udid for udid, conn in list(dm._connections.items())
+            if getattr(conn, "connection_type", "") == "Network"
+        ]
+        for udid in udids:
+            try:
+                await dm.disconnect(udid)
+                _tunnel_logger.info("Disconnected WiFi device %s on tunnel stop", udid)
+            except Exception:
+                _tunnel_logger.exception("Failed to disconnect %s", udid)
+        # Drop the stale simulation engine so the next /status etc. returns 400
+        # rather than exploding on a closed socket.
+        if udids and app_state.simulation_engine is not None:
+            app_state.simulation_engine = None
+    except Exception:
+        _tunnel_logger.exception("Pre-stop disconnect step failed")
 
     if _tunnel_proc is None or _tunnel_proc.poll() is not None:
         _tunnel_proc = None

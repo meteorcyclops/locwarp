@@ -326,7 +326,7 @@ const DeviceStatus: React.FC<DeviceStatusProps> = ({
                     cursor: 'pointer',
                   }}
                 >
-                  ? 如何找 IP
+                  如何找 IP?
                 </button>
                 {wifiTab === 'ios17plus' && (
                   <button
@@ -472,7 +472,7 @@ const DeviceStatus: React.FC<DeviceStatusProps> = ({
                         </div>
                       )}
                       <div style={{ fontSize: 10, opacity: 0.4, marginTop: 6 }}>
-                        iOS 17 以下不需建立 RSD tunnel,iPhone 解鎖且已配對即可直接連線。
+                        iPhone 解鎖並已配對即可直接連線。
                       </div>
                     </>
                   ) : (
