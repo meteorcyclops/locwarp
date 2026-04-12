@@ -236,7 +236,7 @@ build-installer.bat
 
 ## 使用者端需求
 
-**下載安裝檔**:https://github.com/keezxc1223/locwarp/releases
+**[下載安裝檔](https://github.com/keezxc1223/locwarp/releases)**
 
 使用安裝檔的使用者需要以下四項前置:
 
