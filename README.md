@@ -9,7 +9,7 @@
 > | **26.4.1** | 開發者實測 | ✅ 開發者驗證通過 |
 > | **18.1.1** | 社群使用者回報 | ✅ 回報可正常運作 |
 >
-> 其餘版本尚未經過測試,使用前請自行評估相容性;若成功運作或遇到問題,歡迎至 [Issues](https://github.com/keezxc1223/locwarp/issues) 回報以協助擴充本表。
+> 其餘版本尚未經過測試,使用前請自行評估相容性。無論是成功運作、遇到問題、發現 Bug,或有任何建議與回饋,皆歡迎至 [Issues](https://github.com/keezxc1223/locwarp/issues) 提出,以協助持續完善本專案。
 
 <p align="center">
   <img src="frontend/build/icon.png" width="128" alt="LocWarp">
