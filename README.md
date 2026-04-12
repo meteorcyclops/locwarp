@@ -232,4 +232,6 @@ locwarp/
 
 ## License
 
-Private / internal use.
+MIT License — 個人專案,歡迎自由使用、修改、散佈,但請保留原作者標註。無任何擔保。
+
+> ⚠ 本工具僅供學習與個人研究用途。使用者需自行承擔因違反 Apple 服務條款、遊戲/App 使用規範而導致的帳號封鎖等後果。
