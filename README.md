@@ -43,15 +43,74 @@
                                               └──────────────────┘
 ```
 
-| 元件 | 技術 |
+### Frontend
+
+| 技術 | 版本 | 用途 |
+| --- | --- | --- |
+| [Electron](https://www.electronjs.org/) | 30 | Desktop shell,負責視窗管理、spawn backend、注入 tile referer |
+| [React](https://react.dev/) | 18.3 | UI framework |
+| [TypeScript](https://www.typescriptlang.org/) | 5.5 | Type-safe JS |
+| [Vite](https://vitejs.dev/) | 5.4 | Dev server + 生產環境打包(`base: './'` 供 `file://` 載入) |
+| [Leaflet](https://leafletjs.com/) | 1.9 | 互動地圖 |
+| CSS | — | 手寫,單一 `styles.css` |
+
+### Backend
+
+| 技術 | 版本 | 用途 |
+| --- | --- | --- |
+| Python | 3.12 | 主 runtime |
+| [FastAPI](https://fastapi.tiangolo.com/) | 0.110+ | REST API + WebSocket |
+| [uvicorn](https://www.uvicorn.org/) | 0.29+ | ASGI server(`:8777`) |
+| [websockets](https://websockets.readthedocs.io/) | 12+ | 即時位置/狀態推播給前端 |
+| [pymobiledevice3](https://github.com/doronz88/pymobiledevice3) | 9.9+ | iOS 裝置協議(DVT / RemoteServices / lockdown) |
+| [pydantic](https://docs.pydantic.dev/) | 2+ | 資料驗證(schemas) |
+| [httpx](https://www.python-httpx.org/) | 0.27+ | OSRM / Nominatim HTTP 呼叫 |
+| [gpxpy](https://github.com/tkrajina/gpxpy) | 1.6+ | GPX 路線解析 |
+
+### WiFi Tunnel(獨立 helper)
+
+| 技術 | 版本 | 用途 |
+| --- | --- | --- |
+| Python | **3.13**(必需) | TLS-PSK 原生支援(3.12 不行) |
+| pymobiledevice3 | 9.9+ | `start_tcp_tunnel()` 建立 RSD tunnel |
+| pytun-pmd3 | — | Windows TUN 介面(wintun.dll) |
+
+### 外部服務(皆免費、無需 API key)
+
+| 服務 | 用途 |
 | --- | --- |
-| Frontend | React 18 + TypeScript + Vite + Leaflet + Electron 30 |
-| Backend | Python 3.12 + FastAPI + uvicorn + websockets |
-| iOS 控制 | pymobiledevice3 (DVT / RemoteServices) |
-| WiFi Tunnel | 獨立 Python 3.13 helper(需 TLS-PSK) |
-| 路由 | OSRM(公共服務) |
-| 地理編碼 | Nominatim(OSM) |
-| Map tiles | CartoDB Voyager(OSM 資料) |
+| [OSRM](https://project-osrm.org/)(`router.project-osrm.org`) | 路線規劃(walking / driving profile) |
+| [Nominatim](https://nominatim.openstreetmap.org/) | 地址 → 座標查詢 |
+| [CartoDB Voyager](https://carto.com/) | 地圖底圖 tile(OSM 資料,免費散佈授權) |
+
+### 打包工具
+
+| 工具 | 用途 |
+| --- | --- |
+| [PyInstaller](https://pyinstaller.org/) | Python → 單檔 exe(backend 用 3.12,tunnel 用 3.13) |
+| [electron-builder](https://www.electron.build/) | Electron 打包成 NSIS 安裝檔 |
+| NSIS | Windows 安裝器 |
+
+### 核心模組(backend/core/)
+
+| 模組 | 職責 |
+| --- | --- |
+| `simulation_engine.py` | 中央控制器,管理狀態轉換、任務生命週期、`_move_along_route()` 核心移動迴圈、`EtaTracker` |
+| `device_manager.py` | 裝置探索、USB / WiFi Tunnel 連線管理 |
+| `navigator.py` | 單一目的地 OSRM 導航 |
+| `route_loop.py` | 封閉路線無限循環 |
+| `multi_stop.py` | 多點依序經過,可停留 |
+| `random_walk.py` | 在半徑內隨機漫遊 |
+| `joystick.py` | 即時方向/力度控制 |
+| `teleport.py` / `restore.py` | 瞬移 / 恢復 |
+
+### 關鍵設計
+
+- **WebSocket 位置推播**:backend 每 tick(`update_interval` 由速度 profile 決定)發 `position_update` 事件,前端即時更新地圖游標 + ETA bar
+- **速度解析**:`config.resolve_speed_profile(mode, speed_kmh, speed_min_kmh, speed_max_kmh)` 統一處理「模式預設 / 固定自訂 / 隨機範圍」三種輸入,優先序 `range > 固定 > 預設`
+- **打包後路徑偵測**:backend 以 `sys.frozen` 判斷是否 PyInstaller bundle,從 `resources/backend/` 反推 `resources/wifi-tunnel/wifi-tunnel.exe`,避免硬編碼路徑
+- **Runtime 狀態目錄**:一律寫入 `~/.locwarp/`(bookmarks / settings / tunnel info),避免 PyInstaller 的 `_MEIPASS` 臨時目錄問題
+- **Tile referer / OSM 替換**:OSM 的 tile 服務封鎖散佈型應用,已改用 CartoDB(OSM 資料源、CARTO 代管 CDN、免 referer)
 
 ---
 
