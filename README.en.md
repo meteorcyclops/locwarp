@@ -26,6 +26,12 @@ cd locwarp
 python3 locwarp.py serve --open
 ```
 
+Or:
+
+```bash
+python3 start.py
+```
+
 Or double-click:
 
 ```text
@@ -42,7 +48,14 @@ python3 locwarp.py serve --backend-only
 
 ```bash
 python3 locwarp.py device-list
+python3 locwarp.py device-connect <udid>
+python3 locwarp.py status
+python3 locwarp.py search "Taipei 101"
 python3 locwarp.py teleport 25.033 121.5654
+python3 locwarp.py navigate 25.033 121.5654 --mode walking
+python3 locwarp.py pause
+python3 locwarp.py resume
+python3 locwarp.py stop
 python3 locwarp.py restore
 ```
 
@@ -67,10 +80,26 @@ python3 locwarp.py open
 
 ```bash
 python3 locwarp.py device-list
+python3 locwarp.py device-connect <udid>
+python3 locwarp.py device-info <udid>
+python3 locwarp.py status
+python3 locwarp.py status --udid <device-udid>
 python3 locwarp.py teleport <lat> <lng>
 python3 locwarp.py teleport <lat> <lng> --udid <device-udid>
+python3 locwarp.py navigate <lat> <lng> --mode walking
+python3 locwarp.py navigate <lat> <lng> --mode driving --speed-kmh 40
+python3 locwarp.py pause
+python3 locwarp.py resume
+python3 locwarp.py stop
 python3 locwarp.py restore
 python3 locwarp.py restore --udid <device-udid>
+```
+
+### Search places
+
+```bash
+python3 locwarp.py search "Taipei 101"
+python3 locwarp.py real-location
 ```
 
 ---
@@ -192,13 +221,15 @@ This fork mainly changes the project in these ways:
 - adds a **macOS-usable** startup path
 - adds `locwarp.py` as a unified entrypoint
 - adds `LocWarp.command` for quick launching on macOS
+- rewires `start.py` to forward into the new CLI-based startup flow
 - rewrites the README around practical cross-platform usage instead of Windows-only packaged app expectations
 
 ---
 
 ## Known limitations
 
-- the CLI still has room to grow beyond `device-list`, `teleport`, and `restore`
+- the CLI now includes `device-connect`, `device-info`, `status`, `search`, `navigate`, `pause`, `resume`, and `stop`
+- there is still room to add loop, multistop, randomwalk, bookmark management, and other advanced commands
 - Electron packaging is still Windows-oriented
 - some flows may still contain Windows-specific assumptions
 - `pymobiledevice3` compatibility may shift as Apple / iOS versions change

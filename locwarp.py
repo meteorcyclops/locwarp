@@ -2,15 +2,15 @@
 from __future__ import annotations
 
 import argparse
-import os
+import json
 import shutil
 import socket
 import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
-import json
 import webbrowser
 from pathlib import Path
 
@@ -54,8 +54,10 @@ def ensure_frontend_deps() -> None:
         subprocess.run(['npm', 'install'], cwd=FRONTEND, check=True)
 
 
-def api_request(method: str, path: str, payload: dict | None = None):
+def api_request(method: str, path: str, payload: dict | None = None, query: dict | None = None):
     url = f'{API_BASE}{path}'
+    if query:
+        url += '?' + urllib.parse.urlencode({k: v for k, v in query.items() if v is not None})
     data = None
     headers = {}
     if payload is not None:
@@ -69,6 +71,10 @@ def api_request(method: str, path: str, payload: dict | None = None):
     except urllib.error.HTTPError as e:
         detail = e.read().decode('utf-8', errors='ignore')
         raise SystemExit(f'HTTP {e.code}: {detail}')
+
+
+def print_json(data):
+    print(json.dumps(data, ensure_ascii=False, indent=2))
 
 
 def cmd_serve(args):
@@ -97,6 +103,7 @@ def cmd_serve(args):
         print(f'Backend:  http://127.0.0.1:{BACKEND_PORT}')
         if not args.backend_only:
             print(f'Frontend: http://127.0.0.1:{FRONTEND_PORT}')
+        print(f'Docs:     http://127.0.0.1:{BACKEND_PORT}/docs')
         print('Press Ctrl+C to stop')
         while True:
             time.sleep(1)
@@ -117,21 +124,59 @@ def cmd_open(_args):
 
 
 def cmd_device_list(_args):
-    print(json.dumps(api_request('GET', '/api/device/list'), ensure_ascii=False, indent=2))
+    print_json(api_request('GET', '/api/device/list'))
+
+
+def cmd_device_connect(args):
+    print_json(api_request('POST', f'/api/device/{args.udid}/connect'))
+
+
+def cmd_device_info(args):
+    print_json(api_request('GET', f'/api/device/{args.udid}/info'))
+
+
+def cmd_status(args):
+    print_json(api_request('GET', '/api/location/status', query={'udid': args.udid}))
 
 
 def cmd_teleport(args):
     payload = {'lat': args.lat, 'lng': args.lng}
     if args.udid:
         payload['udid'] = args.udid
-    print(json.dumps(api_request('POST', '/api/location/teleport', payload), ensure_ascii=False, indent=2))
+    print_json(api_request('POST', '/api/location/teleport', payload))
+
+
+def cmd_navigate(args):
+    payload = {'lat': args.lat, 'lng': args.lng, 'mode': args.mode, 'straight_line': args.straight_line}
+    if args.udid:
+        payload['udid'] = args.udid
+    if args.speed_kmh is not None:
+        payload['speed_kmh'] = args.speed_kmh
+    print_json(api_request('POST', '/api/location/navigate', payload))
+
+
+def cmd_stop(args):
+    print_json(api_request('POST', '/api/location/stop', query={'udid': args.udid}))
 
 
 def cmd_restore(args):
-    path = '/api/location/restore'
-    if args.udid:
-        path += f'?udid={args.udid}'
-    print(json.dumps(api_request('POST', path), ensure_ascii=False, indent=2))
+    print_json(api_request('POST', '/api/location/restore', query={'udid': args.udid}))
+
+
+def cmd_pause(args):
+    print_json(api_request('POST', '/api/location/pause', query={'udid': args.udid}))
+
+
+def cmd_resume(args):
+    print_json(api_request('POST', '/api/location/resume', query={'udid': args.udid}))
+
+
+def cmd_search(args):
+    print_json(api_request('GET', '/api/geocode/search', query={'q': args.query, 'limit': args.limit}))
+
+
+def cmd_real_location(_args):
+    print_json(api_request('GET', '/api/geocode/real-location'))
 
 
 def build_parser():
@@ -149,15 +194,56 @@ def build_parser():
     dl = sub.add_parser('device-list', help='list discovered devices')
     dl.set_defaults(func=cmd_device_list)
 
+    dc = sub.add_parser('device-connect', help='connect a device by udid')
+    dc.add_argument('udid')
+    dc.set_defaults(func=cmd_device_connect)
+
+    di = sub.add_parser('device-info', help='show device info by udid')
+    di.add_argument('udid')
+    di.set_defaults(func=cmd_device_info)
+
+    st = sub.add_parser('status', help='show simulation status')
+    st.add_argument('--udid')
+    st.set_defaults(func=cmd_status)
+
     tp = sub.add_parser('teleport', help='teleport device to lat/lng')
     tp.add_argument('lat', type=float)
     tp.add_argument('lng', type=float)
     tp.add_argument('--udid')
     tp.set_defaults(func=cmd_teleport)
 
+    nav = sub.add_parser('navigate', help='navigate device to lat/lng')
+    nav.add_argument('lat', type=float)
+    nav.add_argument('lng', type=float)
+    nav.add_argument('--mode', choices=['walking', 'running', 'driving'], default='walking')
+    nav.add_argument('--speed-kmh', type=float)
+    nav.add_argument('--straight-line', action='store_true')
+    nav.add_argument('--udid')
+    nav.set_defaults(func=cmd_navigate)
+
+    sp = sub.add_parser('stop', help='stop movement without restore')
+    sp.add_argument('--udid')
+    sp.set_defaults(func=cmd_stop)
+
     rs = sub.add_parser('restore', help='restore real location')
     rs.add_argument('--udid')
     rs.set_defaults(func=cmd_restore)
+
+    pa = sub.add_parser('pause', help='pause current movement')
+    pa.add_argument('--udid')
+    pa.set_defaults(func=cmd_pause)
+
+    re = sub.add_parser('resume', help='resume current movement')
+    re.add_argument('--udid')
+    re.set_defaults(func=cmd_resume)
+
+    se = sub.add_parser('search', help='search address/geocode')
+    se.add_argument('query')
+    se.add_argument('--limit', type=int, default=5)
+    se.set_defaults(func=cmd_search)
+
+    rl = sub.add_parser('real-location', help='get current public-IP real location')
+    rl.set_defaults(func=cmd_real_location)
     return p
 
 

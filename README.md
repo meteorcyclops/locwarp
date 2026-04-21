@@ -26,6 +26,12 @@ cd locwarp
 python3 locwarp.py serve --open
 ```
 
+或：
+
+```bash
+python3 start.py
+```
+
 或直接雙擊：
 
 ```text
@@ -42,7 +48,14 @@ python3 locwarp.py serve --backend-only
 
 ```bash
 python3 locwarp.py device-list
+python3 locwarp.py device-connect <udid>
+python3 locwarp.py status
+python3 locwarp.py search 台北101
 python3 locwarp.py teleport 25.033 121.5654
+python3 locwarp.py navigate 25.033 121.5654 --mode walking
+python3 locwarp.py pause
+python3 locwarp.py resume
+python3 locwarp.py stop
 python3 locwarp.py restore
 ```
 
@@ -67,10 +80,26 @@ python3 locwarp.py open
 
 ```bash
 python3 locwarp.py device-list
+python3 locwarp.py device-connect <udid>
+python3 locwarp.py device-info <udid>
+python3 locwarp.py status
+python3 locwarp.py status --udid <device-udid>
 python3 locwarp.py teleport <lat> <lng>
 python3 locwarp.py teleport <lat> <lng> --udid <device-udid>
+python3 locwarp.py navigate <lat> <lng> --mode walking
+python3 locwarp.py navigate <lat> <lng> --mode driving --speed-kmh 40
+python3 locwarp.py pause
+python3 locwarp.py resume
+python3 locwarp.py stop
 python3 locwarp.py restore
 python3 locwarp.py restore --udid <device-udid>
+```
+
+### 查地點
+
+```bash
+python3 locwarp.py search 台北101
+python3 locwarp.py real-location
 ```
 
 ---
@@ -192,13 +221,15 @@ python3 locwarp.py serve --open
 - 新增 **macOS 可用** 的啟動流程
 - 新增 `locwarp.py` 作為統一入口
 - 新增 `LocWarp.command` 方便 mac 直接啟動
+- 將 `start.py` 改為直接導向新 CLI 啟動流程
 - README 改成以跨平台實際使用方式為主，而不是只聚焦 Windows 打包 app
 
 ---
 
 ## 已知限制
 
-- `device-list`、`teleport`、`restore` 之外，CLI 還有擴充空間
+- CLI 已補上 `device-connect`、`device-info`、`status`、`search`、`navigate`、`pause`、`resume`、`stop`
+- 仍可再繼續補 loop、multistop、randomwalk、bookmark 管理等進階指令
 - Electron 打包流程仍偏向 Windows
 - 某些流程可能仍有 Windows-only 分支或假設
 - 若 Apple / iOS 版本更新，`pymobiledevice3` 相容性可能受影響
