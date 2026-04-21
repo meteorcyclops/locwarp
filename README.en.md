@@ -1,38 +1,34 @@
 # LocWarp
 
-**A cross-platform iPhone virtual location tool, now focused on CLI + browser UI workflows.**
+**A cross-platform iPhone virtual location tool, with this fork now focused on a full CLI + browser UI workflow.**
 
-This fork is no longer centered on the original "Windows packaged Electron app" workflow. Instead, it reshapes LocWarp into a setup that is easier to run and maintain:
+This fork has a very different emphasis from the original project:
 
-- runs on **macOS**
-- can be used directly via **CLI**
-- can still use the existing frontend through a **browser UI** connected to the backend
+- **runs on macOS**
+- **exposes core features through CLI**
+- still supports a **browser UI** backed by the existing frontend
+- no longer treats the packaged Windows Electron app as the only primary workflow
 
-Right now, the most practical and clearly supported workflow in this fork is:
-- **CLI / browser mode**
-- **macOS development usage**
-- **Windows can also use the same CLI / browser flow**
-
-> Note: this fork is not yet a fully packaged native macOS app. It is a more practical cross-platform launcher and workflow for the existing project.
+If you want LocWarp to behave like a scriptable, automatable toolchain that is practical on macOS, this fork is moving in that direction.
 
 ---
 
 ## Quick start
 
-### macOS
+### Start full service
 
 ```bash
 cd locwarp
 python3 locwarp.py serve --open
 ```
 
-Or:
+### Start through the legacy entrypoint
 
 ```bash
 python3 start.py
 ```
 
-Or double-click:
+### Double-click on macOS
 
 ```text
 LocWarp.command
@@ -44,15 +40,102 @@ LocWarp.command
 python3 locwarp.py serve --backend-only
 ```
 
-### Common CLI commands
+---
+
+## CLI overview
+
+```bash
+locwarp serve
+locwarp open
+locwarp device-list
+locwarp device-connect
+locwarp device-info
+locwarp status
+locwarp search
+locwarp real-location
+locwarp teleport
+locwarp navigate
+locwarp loop
+locwarp multistop
+locwarp randomwalk
+locwarp pause
+locwarp resume
+locwarp stop
+locwarp restore
+locwarp recent-list
+locwarp recent-add
+locwarp recent-clear
+locwarp bookmark-list
+locwarp bookmark-add
+locwarp bookmark-delete
+locwarp category-list
+locwarp category-add
+locwarp route-plan
+locwarp route-list
+locwarp route-save
+locwarp route-rename
+locwarp route-delete
+locwarp route-export
+locwarp route-import
+locwarp gpx-import
+locwarp gpx-export
+```
+
+In practice, run commands like this:
+
+```bash
+python3 locwarp.py <command>
+```
+
+---
+
+## Common workflow
+
+### 1. Start services
+
+```bash
+python3 locwarp.py serve --open
+```
+
+### 2. List devices
 
 ```bash
 python3 locwarp.py device-list
+```
+
+### 3. Connect a device
+
+```bash
 python3 locwarp.py device-connect <udid>
-python3 locwarp.py status
+```
+
+### 4. Search a place
+
+```bash
 python3 locwarp.py search "Taipei 101"
+```
+
+### 5. Teleport
+
+```bash
 python3 locwarp.py teleport 25.033 121.5654
+```
+
+### 6. Navigate
+
+```bash
 python3 locwarp.py navigate 25.033 121.5654 --mode walking
+```
+
+### 7. Check status
+
+```bash
+python3 locwarp.py status
+```
+
+### 8. Pause / resume / stop / restore
+
+```bash
 python3 locwarp.py pause
 python3 locwarp.py resume
 python3 locwarp.py stop
@@ -61,52 +144,237 @@ python3 locwarp.py restore
 
 ---
 
-## CLI commands
+## Command reference
 
-### Start services
+## Startup and frontend
+
+### `serve`
+Starts backend, and optionally frontend too.
 
 ```bash
 python3 locwarp.py serve --open
 python3 locwarp.py serve --backend-only
 ```
 
-### Open frontend
+### `open`
+Open the frontend page in the browser.
 
 ```bash
 python3 locwarp.py open
 ```
 
-### Device operations
+---
+
+## Devices
+
+### `device-list`
 
 ```bash
 python3 locwarp.py device-list
+```
+
+### `device-connect`
+
+```bash
 python3 locwarp.py device-connect <udid>
+```
+
+### `device-info`
+
+```bash
 python3 locwarp.py device-info <udid>
+```
+
+---
+
+## Location and movement
+
+### `status`
+
+```bash
 python3 locwarp.py status
-python3 locwarp.py status --udid <device-udid>
-python3 locwarp.py teleport <lat> <lng>
-python3 locwarp.py teleport <lat> <lng> --udid <device-udid>
-python3 locwarp.py navigate <lat> <lng> --mode walking
-python3 locwarp.py navigate <lat> <lng> --mode driving --speed-kmh 40
+python3 locwarp.py status --udid <udid>
+```
+
+### `teleport`
+
+```bash
+python3 locwarp.py teleport 25.033 121.5654
+python3 locwarp.py teleport 25.033 121.5654 --udid <udid>
+```
+
+### `navigate`
+
+```bash
+python3 locwarp.py navigate 25.033 121.5654 --mode walking
+python3 locwarp.py navigate 25.033 121.5654 --mode driving --speed-kmh 40
+```
+
+### `loop`
+
+```bash
+python3 locwarp.py loop 25.033,121.5654 25.034,121.5660 25.032,121.5670 --mode walking
+python3 locwarp.py loop 25.033,121.5654 25.034,121.5660 25.032,121.5670 --lap-count 5
+```
+
+### `multistop`
+
+```bash
+python3 locwarp.py multistop 25.033,121.5654 25.034,121.5660 25.032,121.5670 --stop-duration 10
+```
+
+### `randomwalk`
+
+```bash
+python3 locwarp.py randomwalk 25.033 121.5654 --radius-m 500
+```
+
+### `pause` / `resume` / `stop` / `restore`
+
+```bash
 python3 locwarp.py pause
 python3 locwarp.py resume
 python3 locwarp.py stop
 python3 locwarp.py restore
-python3 locwarp.py restore --udid <device-udid>
 ```
 
-### Search places
+---
+
+## Geocoding
+
+### `search`
 
 ```bash
 python3 locwarp.py search "Taipei 101"
+python3 locwarp.py search "Shibuya Station"
+```
+
+### `real-location`
+
+```bash
 python3 locwarp.py real-location
+```
+
+---
+
+## Recent
+
+### `recent-list`
+
+```bash
+python3 locwarp.py recent-list
+```
+
+### `recent-add`
+
+```bash
+python3 locwarp.py recent-add 25.033 121.5654 --kind teleport --name "Taipei 101"
+```
+
+### `recent-clear`
+
+```bash
+python3 locwarp.py recent-clear
+```
+
+---
+
+## Bookmarks
+
+### `bookmark-list`
+
+```bash
+python3 locwarp.py bookmark-list
+```
+
+### `bookmark-add`
+
+```bash
+python3 locwarp.py bookmark-add "Taipei 101" 25.033 121.5654
+python3 locwarp.py bookmark-add "Home" 25.0 121.5 --address "Taipei" --category-id default
+```
+
+### `bookmark-delete`
+
+```bash
+python3 locwarp.py bookmark-delete <bookmark-id>
+```
+
+### `category-list`
+
+```bash
+python3 locwarp.py category-list
+```
+
+### `category-add`
+
+```bash
+python3 locwarp.py category-add "Japan" --color "#ff5a5f"
+```
+
+---
+
+## Routes / GPX
+
+### `route-plan`
+
+```bash
+python3 locwarp.py route-plan 25.033 121.5654 25.047 121.517 --profile walking
+```
+
+### `route-list`
+
+```bash
+python3 locwarp.py route-list
+```
+
+### `route-save`
+
+```bash
+python3 locwarp.py route-save "Taipei Loop" 25.033,121.5654 25.034,121.5660 25.032,121.5670 --profile walking
+```
+
+### `route-rename`
+
+```bash
+python3 locwarp.py route-rename <route-id> "New Name"
+```
+
+### `route-delete`
+
+```bash
+python3 locwarp.py route-delete <route-id>
+```
+
+### `route-export`
+
+```bash
+python3 locwarp.py route-export routes.json
+```
+
+### `route-import`
+
+```bash
+python3 locwarp.py route-import routes.json
+```
+
+### `gpx-import`
+
+```bash
+python3 locwarp.py gpx-import my-route.gpx
+```
+
+### `gpx-export`
+
+```bash
+python3 locwarp.py gpx-export <route-id> output.gpx
 ```
 
 ---
 
 ## Runtime model
 
-LocWarp currently has two layers:
+LocWarp still has two major layers:
 
 1. **backend**
    - FastAPI
@@ -116,123 +384,43 @@ LocWarp currently has two layers:
    - Vite + React
    - controls the backend through a browser UI
 
-The new `locwarp.py` helps with:
-- starting the backend
-- starting the frontend dev server
-- opening the browser
-- calling common APIs through a simple CLI
+`locwarp.py` is now the unified entrypoint for this fork.
 
 ---
 
-## Platform status
+## Platform focus
 
 ### Recommended now
 
-- macOS: **supported in CLI / browser mode**
-- Windows: **supported in CLI / browser mode**, while upstream Electron-related files are still kept in the repo
+- macOS: **full CLI / browser workflow**
+- Windows: **can also use the same CLI / browser workflow**
 
-### Not guaranteed yet
+### Not the main focus right now
 
-- fully packaged native macOS Electron app
-- complete stability across every iOS version and every Apple pairing / tunnel workflow
-
-Actual device control still depends on:
-- `pymobiledevice3`
-- iOS / iPadOS version
-- Apple trust / pairing state
-- tunnel / developer mode / USB connection health
-
----
-
-## Features
-
-### Movement modes
-
-- Teleport
-- Navigate
-- Route Loop
-- Multi-stop
-- Random Walk
-- Joystick
-
-### Other capabilities
-
-- USB connection
-- WiFi / tunnel-related flows
-- Dual-device group mode
-- bookmarks, recents, route planning
-- browser-based UI control
-
----
-
-## Requirements
-
-### Required tools
-
-- Python 3
-- Node.js / npm
-
-### Python dependencies
-
-Main dependencies come from `backend/requirements.txt`, including:
-
-- `pymobiledevice3`
-- `fastapi`
-- `uvicorn`
-- `httpx`
-- `gpxpy`
-
-### Frontend dependencies
-
-Managed through `frontend/package.json`.
-
----
-
-## Development
-
-### backend
-
-```bash
-cd backend
-python3 main.py
-```
-
-### frontend
-
-```bash
-cd frontend
-npm install
-npm run dev
-```
-
-### full startup
-
-```bash
-python3 locwarp.py serve --open
-```
+- fully packaged native macOS app
+- making every Electron packaging flow fully cross-platform
 
 ---
 
 ## How this fork differs from upstream
 
-This fork mainly changes the project in these ways:
+This fork mainly does the following:
 
-- shifts the startup model to **CLI / browser-first**
+- shifts the project to **CLI / browser-first**
 - adds a **macOS-usable** startup path
-- adds `locwarp.py` as a unified entrypoint
-- adds `LocWarp.command` for quick launching on macOS
-- rewires `start.py` to forward into the new CLI-based startup flow
-- rewrites the README around practical cross-platform usage instead of Windows-only packaged app expectations
+- adds `locwarp.py` as the unified CLI entrypoint
+- rewires `start.py` into the new CLI-based flow
+- rewrites the README around the actual workflow
+- exposes core backend abilities through CLI commands instead of relying only on the UI
 
 ---
 
 ## Known limitations
 
-- the CLI now includes `device-connect`, `device-info`, `status`, `search`, `navigate`, `pause`, `resume`, and `stop`
-- there is still room to add loop, multistop, randomwalk, bookmark management, and other advanced commands
+- bookmark/category update, move, import/export commands are not fully exposed yet
+- device disconnect, wifi tunnel, and developer mode reveal commands can still be added
 - Electron packaging is still Windows-oriented
-- some flows may still contain Windows-specific assumptions
-- `pymobiledevice3` compatibility may shift as Apple / iOS versions change
+- real-world control still depends on Apple / iOS / `pymobiledevice3` compatibility
 
 ---
 
