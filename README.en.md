@@ -88,6 +88,40 @@ TB1i7pEcifAeh8oDLLZFqiRVrpUaZmmDAn
 
 ---
 
+## macOS / CLI Usage (experimental)
+
+LocWarp is still primarily a Windows-focused project, but this repo can now also run on macOS in **browser + Python CLI** mode.
+
+### Quick start on macOS
+
+```bash
+cd locwarp
+python3 locwarp.py serve --open
+```
+
+Or double-click:
+
+```text
+LocWarp.command
+```
+
+### Common CLI commands
+
+```bash
+python3 locwarp.py serve --backend-only
+python3 locwarp.py device-list
+python3 locwarp.py teleport 25.033 121.5654
+python3 locwarp.py restore
+```
+
+### Notes
+
+- This is a **CLI / browser mode**, not a fully packaged native macOS app
+- Frontend runs on `http://127.0.0.1:5173`
+- Backend API runs on `http://127.0.0.1:8777`
+- Actual device control still depends on `pymobiledevice3`, iOS version, and Apple tunnel / pairing compatibility
+
+
 ## Features
 
 ### Movement Modes

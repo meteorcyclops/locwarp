@@ -87,6 +87,40 @@ TB1i7pEcifAeh8oDLLZFqiRVrpUaZmmDAn
 
 ---
 
+## macOS / CLI 使用方式（實驗性）
+
+LocWarp 原本主要以 Windows 為主，但 repo 目前也可用 **browser + Python CLI** 方式在 macOS 啟動。
+
+### 快速啟動（macOS）
+
+```bash
+cd locwarp
+python3 locwarp.py serve --open
+```
+
+或直接雙擊：
+
+```text
+LocWarp.command
+```
+
+### 常用 CLI
+
+```bash
+python3 locwarp.py serve --backend-only   # 只跑 backend
+python3 locwarp.py device-list            # 列出裝置
+python3 locwarp.py teleport 25.033 121.5654
+python3 locwarp.py restore
+```
+
+### 說明
+
+- 這是 **CLI / browser 模式**，不是完整打包的原生 mac app
+- 前端會跑在 `http://127.0.0.1:5173`
+- 後端 API 會跑在 `http://127.0.0.1:8777`
+- 實際能否控制裝置，仍取決於 `pymobiledevice3`、iOS 版本與 Apple / tunnel 相容性
+
+
 ## 功能
 
 ### 移動模式
