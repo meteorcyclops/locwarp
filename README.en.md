@@ -1,98 +1,25 @@
 # LocWarp
 
-**iOS Virtual Location Simulator**, a Windows-based tool that controls an iPhone's GPS location. Supports Teleport, Navigate, Route Loop, Multi-Stop, Random Walk, and Joystick modes over USB or Wi-Fi.
+**A cross-platform iPhone virtual location tool, now focused on CLI + browser UI workflows.**
 
-<p align="right">
-  <a href="README.md"><img alt="繁體中文" src="https://img.shields.io/badge/繁體中文-gray?style=flat-square"></a>
-  <a href="README.en.md"><img alt="English" src="https://img.shields.io/badge/English-active-2d3748?style=flat-square"></a>
-</p>
+This fork is no longer centered on the original "Windows packaged Electron app" workflow. Instead, it reshapes LocWarp into a setup that is easier to run and maintain:
 
-<p align="center">
-  <a href="https://ko-fi.com/haoooooo" target="_blank">
-    <img src="https://img.shields.io/badge/Ko--fi-Buy%20me%20a%20coffee-FF5E5B?style=for-the-badge&logo=ko-fi&logoColor=white" alt="Ko-fi" height="40">
-  </a>
-  &nbsp;&nbsp;
-  <a href="https://lin.ee/UwdCrmf" target="_blank">
-    <img src="https://img.shields.io/badge/LINE-Add%20Friend-06C755?style=for-the-badge&logo=line&logoColor=white" alt="LINE" height="40">
-  </a>
-  &nbsp;&nbsp;
-  <a href="#usdt-tip-jar-trc-20--tron-network" target="_blank">
-    <img src="https://img.shields.io/badge/USDT-TRC--20-26A17B?style=for-the-badge&logo=tether&logoColor=white" alt="USDT" height="40">
-  </a>
-</p>
+- runs on **macOS**
+- can be used directly via **CLI**
+- can still use the existing frontend through a **browser UI** connected to the backend
 
-> If LocWarp has been useful to you, [buy me a coffee](https://ko-fi.com/haoooooo) ☕  
-> No PayPal? Feel free to [reach me on LINE](https://lin.ee/UwdCrmf), or send USDT directly using the address below.
+Right now, the most practical and clearly supported workflow in this fork is:
+- **CLI / browser mode**
+- **macOS development usage**
+- **Windows can also use the same CLI / browser flow**
 
-### USDT tip jar (TRC-20 / TRON network)
-
-**Wallet address**
-
-```
-TB1i7pEcifAeh8oDLLZFqiRVrpUaZmmDAn
-```
-
-**TRC-20 (TRON network) only**
-
-<p>
-  <img src="docs/donate-usdt-tron-qr.png" alt="USDT TRC-20 QR" width="260">
-</p>
-
-
-> ### Project Nature
->
-> LocWarp is an independently-maintained open source project, not a commercial product, and without a dedicated team. The author will make reasonable efforts to add features, respond to issues, fix bugs and track iOS / pymobiledevice3 updates, however:
->
-> - Stable operation is only guaranteed in **the developer's own test environment** (currently iPhone 16 Pro Max / iOS 26.4.1 + Windows 11 Pro);
-> - **Stability on other devices, iOS patch revisions, network environments or system configurations is not guaranteed**;
-> - If you run into issues, please open an [Issue](https://github.com/keezxc1223/locwarp/issues) with full environment details and logs so the problem can be reproduced and addressed;
-> - The project makes no commitment to perpetual maintenance, and accepts no liability for consequences arising from its use.
-
-> ### System Requirements
->
-> **Starting with v0.1.49, LocWarp only supports iOS / iPadOS 17 and later.**
->
-> iOS 17+ is the primary supported range (developer-tested). **iOS 16.x is community-maintained by @bitifyChen (#9) starting from v0.2.5**, via the LegacyLocationService path; the effective minimum is iOS 16.0. iOS 15 and below remain unsupported.
-
-> ### Compatibility Status
->
-> | Major Version | Verified Versions | Status |
-> | --- | --- | --- |
-> | **iOS 26.x** | **26.4.1** (developer-tested) · 26.4.1 iPadOS · 26.4 · 26.3.1 · 26.2 · 26.2.1 iPadOS (M1 iPad) | ![Verified](https://img.shields.io/badge/Verified-4caf50?style=flat-square) ![Reported](https://img.shields.io/badge/Reported-6c8cff?style=flat-square) |
-> | **iOS 18.x** | 18.7.7 · 18.7.1 · 18.6.2 · 18.5 iPadOS · 18.1.1 | ![Reported](https://img.shields.io/badge/Reported-6c8cff?style=flat-square) |
-> | **iOS 17.x** | 17.6.1 | ![Reported](https://img.shields.io/badge/Reported-6c8cff?style=flat-square) |
-> | **iOS 16.x** (community) | 16.7.15 · 16.7.12 ([#9](https://github.com/keezxc1223/locwarp/pull/9), @bitifyChen) | ![Reported](https://img.shields.io/badge/Reported-6c8cff?style=flat-square) ![Community](https://img.shields.io/badge/Community-ffa726?style=flat-square) |
-> | **iOS 15.x and below** | n/a | ![Unsupported](https://img.shields.io/badge/Unsupported-f44336?style=flat-square) |
->
-> **Note**: The table above aggregates developer-tested results and a handful of community reports. It **does not guarantee that every device on the same iOS version, network environment, or system configuration will work**. iOS virtual location stability depends on the exact iOS patch revision, pymobiledevice3's support for that revision, whether the Developer Disk Image mounts successfully, and the Windows host's driver / VPN / firewall / AV stack. "Reported" therefore means **at least one user succeeded in their specific environment**, it is not a universal compatibility claim.
->
-> iOS 16+ versions not listed are not confirmed incompatible; they simply have not been reported yet. Please evaluate the risk before use. If you encounter issues, spot bugs, or confirm a version works, please open an [Issue](https://github.com/keezxc1223/locwarp/issues) so we can build up compatibility data.
-
-<p align="center">
-  <img src="frontend/build/icon.png" width="128" alt="LocWarp">
-</p>
-
-<p align="center">
-  <a href="#prerequisites">
-    <img alt="User Guide" src="https://img.shields.io/badge/User_Guide-2d3748?style=for-the-badge&logo=readthedocs&logoColor=white">
-  </a>
-  <a href="https://github.com/keezxc1223/locwarp/releases">
-    <img alt="Download" src="https://img.shields.io/badge/Download-4285f4?style=for-the-badge&logo=github&logoColor=white">
-  </a>
-</p>
-
-<p align="center">
-  <img src="docs/demo-v2.gif" width="720" alt="LocWarp demo">
-</p>
-
+> Note: this fork is not yet a fully packaged native macOS app. It is a more practical cross-platform launcher and workflow for the existing project.
 
 ---
 
-## macOS / CLI Usage (experimental)
+## Quick start
 
-LocWarp is still primarily a Windows-focused project, but this repo can now also run on macOS in **browser + Python CLI** mode.
-
-### Quick start on macOS
+### macOS
 
 ```bash
 cd locwarp
@@ -105,398 +32,200 @@ Or double-click:
 LocWarp.command
 ```
 
-### Common CLI commands
+### Backend only
 
 ```bash
 python3 locwarp.py serve --backend-only
+```
+
+### Common CLI commands
+
+```bash
 python3 locwarp.py device-list
 python3 locwarp.py teleport 25.033 121.5654
 python3 locwarp.py restore
 ```
 
-### Notes
+---
 
-- This is a **CLI / browser mode**, not a fully packaged native macOS app
-- Frontend runs on `http://127.0.0.1:5173`
-- Backend API runs on `http://127.0.0.1:8777`
-- Actual device control still depends on `pymobiledevice3`, iOS version, and Apple tunnel / pairing compatibility
+## CLI commands
 
+### Start services
+
+```bash
+python3 locwarp.py serve --open
+python3 locwarp.py serve --backend-only
+```
+
+### Open frontend
+
+```bash
+python3 locwarp.py open
+```
+
+### Device operations
+
+```bash
+python3 locwarp.py device-list
+python3 locwarp.py teleport <lat> <lng>
+python3 locwarp.py teleport <lat> <lng> --udid <device-udid>
+python3 locwarp.py restore
+python3 locwarp.py restore --udid <device-udid>
+```
+
+---
+
+## Runtime model
+
+LocWarp currently has two layers:
+
+1. **backend**
+   - FastAPI
+   - handles device connections, virtual location control, route simulation, pairing, and tunnel flows
+
+2. **frontend**
+   - Vite + React
+   - controls the backend through a browser UI
+
+The new `locwarp.py` helps with:
+- starting the backend
+- starting the frontend dev server
+- opening the browser
+- calling common APIs through a simple CLI
+
+---
+
+## Platform status
+
+### Recommended now
+
+- macOS: **supported in CLI / browser mode**
+- Windows: **supported in CLI / browser mode**, while upstream Electron-related files are still kept in the repo
+
+### Not guaranteed yet
+
+- fully packaged native macOS Electron app
+- complete stability across every iOS version and every Apple pairing / tunnel workflow
+
+Actual device control still depends on:
+- `pymobiledevice3`
+- iOS / iPadOS version
+- Apple trust / pairing state
+- tunnel / developer mode / USB connection health
+
+---
 
 ## Features
 
-### Movement Modes
+### Movement modes
 
-| Mode | Description |
-| --- | --- |
-| **Teleport** | Instantly jump to a coordinate |
-| **Navigate** | Walk / run / drive along an OSRM route to a destination |
-| **Route Loop** | Loop a closed route indefinitely, with a **random 5–20 s pause** each lap |
-| **Multi-stop** | Sequentially visit waypoints, with a **random 5–20 s pause** at each stop (configurable) |
-| **Random Walk** | Wander randomly within a radius, with configurable pause between legs |
-| **Joystick** | Realtime direction + intensity control; supports **WASD / arrow keys** |
+- Teleport
+- Navigate
+- Route Loop
+- Multi-stop
+- Random Walk
+- Joystick
 
+### Other capabilities
 
-### Dual-device Group Mode (v0.2.0+)
-
-Connect **two iPhones at once**. Every action (teleport, navigate, loop, multi-stop, random walk, joystick, pause, resume, stop, apply speed, restore-all) fans out to both devices in parallel.
-
-- Two device chips in the sidebar header show connection state and sim state. Right-click for per-device restore / enable dev mode / disconnect.
-- Status bar dual pills show coords, speed, mode for each device. "Restore all" wipes both at once.
-- **Auto pre-sync start**: before any group action, both devices teleport to the same coordinate so they follow identical paths.
-- **Random walk shared seed**: both devices use the same RNG seed, producing identical destination sequences. Runs for hours without drifting apart.
-- **Cooldown is force-off in dual mode**: per-device cooldowns would otherwise block fan-out actions.
-- **Auto-connect**: USB watchdog polls every 1 s and auto-connects new devices up to the cap of 2. **A third plugged-in iPhone is completely ignored** (no Trust prompt, no connect attempt).
-- The map keeps the single-device view (both devices overlap perfectly after pre-sync, so dual markers were just visual noise). Device identity stays visible via chips and status pills.
-
-### OSRM Regional Smart Fallback (v0.2.0+)
-
-The world is bucketed into 1° x 1° grid cells with a per-region OSRM-coverage cache. The first request to a new cell uses a 2.5 s short timeout; if it succeeds the cell is marked ok, if it fails the cell is marked down. **Uncovered regions (e.g. parts of South America or remote Africa) no longer wait 8 s per leg**, they go straight to a densified straight-line route in 0 s. Cache TTL is 10 minutes (auto re-probe in case OSRM coverage changes).
-
-### Speed Control
-
-- **Three presets**: Walking 5 / Running 10 / Driving 40 km/h
-- **Custom fixed speed**: override with any km/h value
-- **Random range**: enter min–max (e.g., 40–80 km/h); backend re-picks per leg for realistic variation
-- **Apply new speed mid-route**: change speed during navigate / loop / multi-stop / random-walk / joystick and press **Apply**, backend re-interpolates the remaining route from the device's current position with the new speed and continues, **no stop+restart needed**
-- Status bar shows the **backend-reported active speed** (typed-but-not-applied values don't lie about what's running)
-- Orange countdown banner shows on top of the map during pauses
-
-### Connection (iOS 16+)
-
-- **USB**: plug in and auto-connect; screen can be locked freely
-- **Wi-Fi Tunnel (USB-free mode)**:
-  - "Auto Detect" first tries mDNS, then falls back to a /24 TCP scan on port 49152
-  - Successful IP / Port is saved to localStorage and auto-filled next launch
-  - Stopping the tunnel automatically falls back to USB if still plugged in
-  - **Re-pair** button: rebuilds a damaged RemotePairing record (`~/.pymobiledevice3/`) via USB in one click (iPhone shows the Trust prompt)
-- **Real-time USB hotplug detection**:
-  - Unplug detected within ~4 s: drops engine + red banner + right-click menu shows "USB disconnected"
-  - Re-plug auto-detected and reconnected, engine rebuilt, **no refresh needed**
-- **Version check on connect**: iOS <16 devices are rejected with an explicit version + upgrade prompt
-
-### Developer Disk Image
-
-- iOS 17+ requires the **Personalized DDI** to be mounted on the iPhone for DVT (instruments → dtservicehub) to work
-- Since v0.2.58 LocWarp **no longer auto-downloads or auto-mounts the DDI** (iOS 26.4.1's RSD tunnel kept getting reset during the 20 MB upload, leaving the device in an InvalidService loop). LocWarp now only checks whether the DDI is already mounted; if not, it shows a hint asking the user to mount it once via Xcode / 愛思助手 / 3uTools / pymobiledevice3 CLI and reconnect
-
-### Map & Utilities
-
-- **Recenter button** (top-left): centers the map on the current virtual position
-- **Tile layer switcher**: OSM / CartoDB Voyager / ESRI Satellite (top-right)
-- **Local weather**: status bar shows current weather + temp for the virtual location (Open-Meteo, animated SVG icons: breathing sun, falling rain, spinning snow, flashing lightning)
-- **Country flag & timezone**: flag appears automatically after teleport; a toast warns about time-zone diff when moving across zones
-- **Map pin / user avatar** (status bar):
-  - Default blue-dot + 6 bundled character PNGs (rabbit / dog / cat / fox / boy / girl) + custom PNG upload
-  - Uploaded PNG gets its transparent borders auto-trimmed, longest side capped at 88px, rendered at 44px on the map, bare passthrough with no added background
-  - Uploaded image and the active avatar are stored in **two separate localStorage slots**, so picking a preset never wipes a previously uploaded PNG
-  - Click a thumbnail to stage the change (blue highlight), hit **Save** to apply; cancel / X / clicking outside discards
-  - Applies instantly on save, no teleport required to refresh the marker
-- **One-click Restore** (status bar): clears the iPhone's virtual location, with "Clearing…" then "Cleared, please wait for it to take effect" toasts
-- **Stop ≠ Restore**: Stop only halts movement; the simulated location stays put. Use Restore to actually clear it.
-- **Bookmarks & categories**:
-  - Custom coords (single-field `lat, lng` input), JSON full export / import (merge, no overwrite)
-  - Auto-fills **place name** (short) and **country flag** on add (reverse geocode)
-  - **Multi-select delete**, **per-category color picker** (10 presets + arbitrary HEX), search, sort (name / date / last-used)
-  - "Show all on map" toggle: renders every bookmark as a neon-glass capsule pin (with flag) plus Polaroid-style cluster cards when they overlap
-  - Editing coordinates re-fetches the country flag automatically
-- **Saved routes** with **GPX import / export**
-- **Waypoint + route line**: subway-station style S/1/2/3 markers + animated flowing-arrow polyline for clear direction sense
-- **Address search** (Nominatim)
-- **Cooldown anti-detection**: dynamic delay based on teleport distance
-- **Coordinate format switching**: DD / DMS / DM
-- **Right-click menu auto-clamps**: `useLayoutEffect` measures the real menu size and nudges it inward when it would overflow the right / bottom edge
-
-### UX
-
-- Auto-retry on startup races (up to ~20 s window), no manual relaunch required
-- Real-time WebSocket push for position, progress, ETA, remaining distance, device connection state
-- Auto-reconnect on disconnect + banner auto-dismiss
-- **Update check**: at startup, compares against the latest GitHub Release and shows a dialog if a newer version exists (prompt only, never auto-downloads)
-- **Open Log Folder** button (status bar): opens `~/.locwarp/logs/` so you can attach `backend.log` to bug reports
-- Current app version shown in the bottom-right corner
-- UI language: 繁體中文 / English, switchable on the fly
-- **Ko-fi donate button** (sidebar bottom): support the open-source author
-- All state (bookmarks, settings, tunnel info) lives in `~/.locwarp/`
+- USB connection
+- WiFi / tunnel-related flows
+- Dual-device group mode
+- bookmarks, recents, route planning
+- browser-based UI control
 
 ---
 
-## Architecture
+## Requirements
 
-```
-┌─────────────────┐      IPC / HTTP + WS       ┌──────────────────┐
-│ Electron + React│ ─────────────────────────► │ FastAPI backend  │
-│  (port 5173 dev)│ ◄───────────────────────── │  (port 8777)     │
-└─────────────────┘                            └────────┬─────────┘
-                                                        │ pymobiledevice3
-                                                        ▼
-                                              ┌──────────────────┐
-                                              │ iPhone (USB/Wi-Fi)│
-                                              └──────────────────┘
-```
+### Required tools
 
-### Frontend
+- Python 3
+- Node.js / npm
 
-| Tech | Version | Purpose |
-| --- | --- | --- |
-| [Electron](https://www.electronjs.org/) | 30 | Desktop shell: window management, spawn backend, tile referer injection |
-| [React](https://react.dev/) | 18.3 | UI framework |
-| [TypeScript](https://www.typescriptlang.org/) | 5.5 | Type-safe JS |
-| [Vite](https://vitejs.dev/) | 5.4 | Dev server + production bundling (`base: './'` for `file://` loading) |
-| [Leaflet](https://leafletjs.com/) | 1.9 | Interactive map (tile switcher + custom divIcon bookmark/waypoint markers + animated polyline) |
-| Inline SVG | n/a | Weather icons, bookmark pins, waypoint markers, controls. Zero third-party icon sets. |
-| CSS | n/a | Hand-written `styles.css`, includes all keyframe animations |
+### Python dependencies
 
-### Backend
+Main dependencies come from `backend/requirements.txt`, including:
 
-| Tech | Version | Purpose |
-| --- | --- | --- |
-| Python | 3.13 | Runtime (upgraded from 3.12 in v0.2.4) |
-| [FastAPI](https://fastapi.tiangolo.com/) | 0.110+ | REST API + WebSocket |
-| [uvicorn](https://www.uvicorn.org/) | 0.29+ | ASGI server (`:8777`) |
-| [websockets](https://websockets.readthedocs.io/) | 12+ | Real-time position / status push to frontend |
-| [pymobiledevice3](https://github.com/doronz88/pymobiledevice3) | 9.9+ | iOS device protocols (DVT / RemoteServices / lockdown / LegacyLocationService) |
-| [pydantic](https://docs.pydantic.dev/) | 2+ | Request / response validation (schemas) |
-| [httpx](https://www.python-httpx.org/) | 0.27+ | OSRM / Nominatim / TimezoneDB HTTP calls |
-| [gpxpy](https://github.com/tkrajina/gpxpy) | 1.6+ | GPX route parsing |
+- `pymobiledevice3`
+- `fastapi`
+- `uvicorn`
+- `httpx`
+- `gpxpy`
 
-### Wi-Fi Tunnel (integrated into backend, v0.2.3+, iOS 17+ only)
+### Frontend dependencies
 
-| Tech | Purpose |
-| --- | --- |
-| pymobiledevice3 `start_tcp_tunnel()` | Establishes RSD tunnel (in-process asyncio task) |
-| pytun-pmd3 | Windows TUN interface (wintun.dll, bundled into backend exe) |
-
-### External Services (all free)
-
-| Service | Caller | Purpose | Key required |
-| --- | --- | --- | --- |
-| [OSRM](https://project-osrm.org/) | backend | Routing + `/table` multi-stop optimization (walking / driving profiles) | No |
-| [Nominatim](https://nominatim.openstreetmap.org/) | backend | Forward / reverse geocoding, place-name lookup (with POI-aware short_name picker) | No |
-| [Open-Meteo](https://open-meteo.com/) | **frontend (direct)** | Current weather at virtual location (temp + WMO weather_code); each user has their own 10,000 req/day per IP | No |
-| [TimezoneDB](https://timezonedb.com/) | backend | Coords → timezone + GMT offset, cross-zone toast | Yes (bundled) |
-| [flagcdn.com](https://flagcdn.com/) | frontend | Country flag PNGs (`w20/{cc}.png`, `w40/{cc}.png`) | No |
-| [CartoDB Voyager](https://carto.com/) | frontend tile | Map tiles (OSM data, redistributable license) | No |
-| [ESRI World Imagery](https://www.esri.com/) | frontend tile | Satellite layer (tile switcher) | No |
-| OpenStreetMap raster | frontend tile | Default OSM layer | No |
-| [GitHub Releases](https://github.com/keezxc1223/locwarp/releases) | frontend | Startup version check (plain HTTP, no telemetry) | No |
-
-### Packaging
-
-| Tool | Purpose |
-| --- | --- |
-| [PyInstaller](https://pyinstaller.org/) | Python → single exe (backend, includes in-process tunnel) |
-| [electron-builder](https://www.electron.build/) | Electron → NSIS installer |
-| NSIS | Windows installer format |
-
-### Core modules (backend/core/)
-
-| Module | Responsibility |
-| --- | --- |
-| `simulation_engine.py` | Central controller: state transitions, task lifecycle, `_move_along_route()` movement loop, `EtaTracker` |
-| `device_manager.py` | Device discovery, USB / Wi-Fi Tunnel connection management |
-| `navigator.py` | Single-destination OSRM navigation |
-| `route_loop.py` | Closed-route infinite loop |
-| `multi_stop.py` | Multi-point sequential with dwell |
-| `random_walk.py` | Random walk inside a radius |
-| `joystick.py` | Real-time direction / magnitude control |
-| `teleport.py` / `restore.py` | Teleport / clear virtual location |
-
-### Key design decisions
-
-- **WebSocket position push**: backend emits `position_update` per tick (`update_interval` is speed-profile-derived); frontend updates map cursor + ETA bar live
-- **Speed resolution**: `config.resolve_speed_profile(mode, speed_kmh, speed_min_kmh, speed_max_kmh)` unifies "mode default / fixed custom / random range" inputs; priority `range > fixed > default`
-- **In-process Wi-Fi tunnel**: since v0.2.3 the backend runs `start_tcp_tunnel()` on its own event loop instead of spawning a helper exe
-- **Runtime state directory**: everything goes to `~/.locwarp/` (bookmarks / settings / tunnel info) to avoid PyInstaller's `_MEIPASS` temp-dir issues
-- **Tile referer / OSM swap**: OSM blocks distributable apps on their public tiles, so CartoDB (OSM data hosted on CARTO's CDN, no referer needed) is the default
-- **Dual-device group mode** (v0.2.0+): synchronized teleport / movement, primary is never hijacked by a late-plugged device, late joiner (B) syncs to A's position and auto-resumes whatever sim A is running (fanout)
-- **Idle-gated geocoding**: reverse geocode + timezone + weather lookups only fire when state is idle / teleport / disconnect AND position moved ≥ 100m; prevents HTTP contending with the DVT channel during active sim
-- **Frontend-direct weather**: `lookupWeather()` calls Open-Meteo from the renderer so each user consumes their own IP's quota, never proxied through backend (would share one source IP across all users)
-- **Auto country flag**: bookmark add / edit triggers reverse geocode to populate `country_code`; re-fetched automatically when coordinates change
-
----
-
-## Prerequisites
-
-**[Download the installer](https://github.com/keezxc1223/locwarp/releases)**
-
-End users must complete the following four steps before use:
-
-### 1. Install Apple USB driver
-
-Windows needs Apple's USB driver to communicate with iPhone. **Either option works**:
-
-- **Classic iTunes for Windows**: [iTunes for Windows (64-bit)](https://secure-appldnld.apple.com/itunes12/047-76416-20260302-fefe4356-211d-4da1-8bc4-058eb36ea803/iTunes64Setup.exe)
-- **Microsoft Store iTunes**: [Store page](https://apps.microsoft.com/detail/9pb2mz1zmb1s)
-- **Microsoft Store "Apple Devices"** (fallback when both iTunes builds fail): [Store page](https://apps.microsoft.com/detail/9np83lwlpz9k?hl=en-US&gl=US)
-
-> **Note:** Install any one of the three. Most users succeed with classic desktop iTunes. If neither iTunes build (desktop or Store) detects the iPhone, community reports indicate that switching to **Apple Devices** works.
-
-### 2. Trust the computer via USB first
-
-On first use, connect the iPhone via USB. When prompted "Trust this computer?", tap **Trust** and enter the passcode. This creates a pair record so that LocWarp can communicate with the device afterwards.
-
-### 3. Enable Developer Mode (iOS 16+)
-
-On iPhone: **Settings → Privacy & Security → Developer Mode → Enable**
-
-The device will reboot. After restart, confirm "Turn On Developer Mode?" when prompted.
-
-### 4. Wi-Fi Tunnel (optional)
-
-To disconnect the USB cable and operate over Wi-Fi:
-- iPhone and the computer must be on the **same Wi-Fi subnet**
-- Step 2 (USB pairing) must still be completed first
-- Click **Start Wi-Fi Tunnel** in LocWarp to establish the RSD tunnel; the USB cable may then be unplugged
-
-#### Connection mode differences
-
-| Method | Lock-screen impact | Recommendation |
-| --- | --- | --- |
-| **USB** | ![Yes](https://img.shields.io/badge/Lockable-4caf50?style=flat-square) Can lock screen freely | n/a |
-| **Wi-Fi Tunnel** | ![No](https://img.shields.io/badge/Not_Lockable-f44336?style=flat-square) Lock-screen drops the tunnel | Disable auto-lock during use |
-
-> **Note:** **Under Wi-Fi Tunnel, locking the iPhone's screen will cause the network interface to sleep and drop the RSD tunnel.**
->
-> Mitigations (any one works):
-> - **Disable auto-lock**: Settings → Display & Brightness → Auto-Lock → **Never**
-> - Keep a LocWarp-related screen in the foreground (prevents low-power mode)
-> - Plug in a charger and keep the display on
->
-> USB users are unaffected and can lock the screen normally without interrupting simulation.
-
-After installation, LocWarp will appear on the desktop and Start Menu. It requires administrator privileges on launch (necessary for the Wi-Fi Tunnel's TUN interface).
+Managed through `frontend/package.json`.
 
 ---
 
 ## Development
 
-### Prerequisites
-
-- Windows 10 / 11
-- Python **3.13** (backend + Wi-Fi tunnel; required for TLS-PSK)
-- Node.js 18+
-
-### Setup
+### backend
 
 ```bash
-# 1. Backend dependencies (includes Wi-Fi tunnel)
-py -3.13 -m pip install -r backend/requirements.txt
+cd backend
+python3 main.py
+```
 
-# 2. Frontend dependencies
+### frontend
+
+```bash
 cd frontend
 npm install
+npm run dev
 ```
 
-### Run (dev mode)
-
-Double-click `LocWarp.bat`, it auto-elevates and invokes `start.py`, which launches:
-- backend (`:8777`)
-- Vite dev server (`:5173`)
-- Electron (loading from the dev server)
-
----
-
-## Build Installer
-
-### One-time setup
+### full startup
 
 ```bash
-py -3.13 -m pip install pyinstaller
-cd frontend && npm install -D electron-builder
+python3 locwarp.py serve --open
 ```
-
-### One-shot build
-
-```bash
-build-installer.bat
-```
-
-Pipeline:
-1. **PyInstaller (3.13)** → `dist-py/locwarp-backend/` (backend + embedded WiFi tunnel)
-2. **Vite** → `frontend/dist/`
-3. **electron-builder** → NSIS installer `frontend/release/LocWarp Setup X.Y.Z.exe` (~110 MB)
-
-The installer is self-contained, end users need no Python or Node installed.
 
 ---
 
-## Troubleshooting
+## How this fork differs from upstream
 
-| Symptom | Likely cause / fix |
-| --- | --- |
-| Backend unreachable after tunnel started | Make sure LocWarp was launched as Administrator |
-| `No such service: com.apple.instruments.dtservicehub` (iOS 17+/26) / LocWarp shows "DDI not mounted" | Since v0.2.58 LocWarp no longer auto-mounts the DDI. Mount it once via Xcode / 愛思助手 / 3uTools / pymobiledevice3 CLI, then reconnect. If mount still fails, toggle Settings → Privacy & Security → **Developer Mode** off, reboot, re-enable, and try mounting again. |
-| **Developer Mode option missing** (iOS 16+) | Since v0.2.61, LocWarp shows a "**Reveal Developer Mode option**" button in the status bar once a device is connected. Clicking it makes the Developer Mode toggle appear in iPhone Settings (no sideloading needed). If the button fails or you prefer manual, see [Appendix: Enabling Developer Mode on iPhone (Windows)](#appendix-enabling-developer-mode-on-iphone-windows) below as a fallback. |
+This fork mainly changes the project in these ways:
+
+- shifts the startup model to **CLI / browser-first**
+- adds a **macOS-usable** startup path
+- adds `locwarp.py` as a unified entrypoint
+- adds `LocWarp.command` for quick launching on macOS
+- rewrites the README around practical cross-platform usage instead of Windows-only packaged app expectations
 
 ---
 
-### Appendix: Enabling Developer Mode on iPhone (Windows)
+## Known limitations
 
-On iOS 16+, **Settings → Privacy & Security → Developer Mode** is hidden by default. Apple only surfaces the toggle after a developer-signed app has been installed, or after an AMFI `reveal` command is sent to the device.
+- the CLI still has room to grow beyond `device-list`, `teleport`, and `restore`
+- Electron packaging is still Windows-oriented
+- some flows may still contain Windows-specific assumptions
+- `pymobiledevice3` compatibility may shift as Apple / iOS versions change
 
-#### Primary flow (recommended, v0.2.61+)
+---
 
-After LocWarp connects to your device, the status bar shows a "**Reveal Developer Mode option**" button (only when the device reports Developer Mode as OFF). Clicking it asks AMFI to write the reveal marker on the iPhone. Then:
+## Project structure
 
-1. On the iPhone, fully close the Settings app (swipe up from the bottom)
-2. Reopen Settings
-3. Go to **Privacy & Security**, scroll down, you should see **Developer Mode**
-4. Turn it on yourself (iPhone will ask to remove the lock-screen passcode first and reboot once)
-
-After the toggle is on, the button disappears automatically from LocWarp.
-
-#### Fallback flow (sideloading an IPA)
-
-If the LocWarp button doesn't work (e.g. the device is only connected over a Wi-Fi tunnel — AMFI isn't advertised over RSD), you can still use the classic sideloading approach:
-
-1. Install [**Sideloadly**](https://sideloadly.io/)
-2. Obtain an IPA file from a decrypted IPA source such as [**Decrypt IPA Store**](https://decrypt.day/) or [**ARM Converter Decrypted App Store**](https://armconverter.com/decryptedappstore/us). A small file-manager-style app is recommended to keep sideload time short
-3. Drag the IPA into the Sideloadly window
-4. Connect the iPhone via USB and enter your personal Apple ID in Sideloadly
-5. Press **Start** and wait for the sideload to complete
-6. On the iPhone: Settings → Privacy & Security → scroll to the bottom → the **Developer Mode** toggle will now appear. Turn it on
-7. The device will prompt to restart. After the reboot, verify Developer Mode is still on
-
-Once done, return to LocWarp and connect. For iOS 17+ you also need to mount the Developer Disk Image once via Xcode / 愛思助手 / 3uTools / pymobiledevice3 CLI; LocWarp itself no longer auto-mounts (since v0.2.58).
+```text
+locwarp/
+├── backend/
+├── frontend/
+├── locwarp.py
+├── LocWarp.command
+├── start.py
+└── stop.py
+```
 
 ---
 
 ## License
 
-Released under the **MIT License**, see [LICENSE](LICENSE).
-
-Free for use, modification, redistribution, and commercial use, provided the original copyright and license notice are retained.
+MIT
 
 ---
 
-## Disclaimer
+## Credits
 
-### 1. Academic & Research Use Only
-
-This project is intended for GIS research, mobile-app development testing, location-service prototyping, and related technical exploration. Do not use it for any unlawful purpose or in violation of third-party service terms.
-
-### 2. Account Ban Risk
-
-LocWarp simulates GPS signals via Apple's DVT / RemoteServices protocol through pymobiledevice3. Using it with location-based games (e.g., Pokémon GO, Ingress, Monster Hunter Now) or with social, check-in, or logistics apps may violate those platforms' terms of service and result in warnings, restrictions, or permanent bans. **The developer is not responsible for any account loss, virtual-property damage, or derivative disputes arising from the use of this tool.**
-
-### 3. System & Hardware Risk
-
-Wi-Fi Tunnel mode requires administrator privileges to create a TUN virtual network interface and negotiate the RSD (Remote Service Discovery) channel with the iOS device. While the code has been internally tested, no guarantee is made that it runs stably under all Windows versions, hardware combinations, or network environments. Known edge cases include:
-
-- Conflicts with VPN software, third-party firewalls, or network virtualization tools preventing the tunnel from starting
-- A stale TUN interface left behind after abnormal termination, requiring a system restart to clean up
-- Connection drops that require a manual retry or application restart
-
-Users bear any consequences resulting from the above. The project only manipulates its own transient network interfaces and its own configuration files (located in `~/.locwarp/`). **It does not modify any user data inside the iOS device, nor alter OS core files or existing device pair records.**
-
-### 4. Map Data Accuracy
-
-LocWarp uses Leaflet on the frontend, tiles served by an OpenStreetMap-derived provider (CartoDB), and OSRM + Nominatim for routing and geocoding. Coordinates, routes, and addresses are **for reference only**. The developer does not guarantee completeness, real-time accuracy, or exact correspondence to real-world geography. Before relying on address search, route navigation, or random-walk results for simulation, users should verify that the displayed data matches expectations.
-
-### 5. User Responsibility
-
-Users must comply with the laws and regulations of their jurisdiction, including but not limited to personal-data protection laws, computer-data processing laws, and copyright laws. Any legal dispute, civil liability, or criminal responsibility arising from misuse or unlawful use of this tool is borne solely by the user; the developer and contributors bear no responsibility.
-
----
-
-**By downloading, installing, or running this software, you acknowledge that you have read and agreed to all of the above. If you do not agree, stop using the software and remove it immediately.**
+- upstream: `keezxc1223/locwarp`
+- this fork focuses on making the project more practical on macOS and in CLI/browser workflows
