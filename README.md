@@ -1,462 +1,196 @@
 # LocWarp
 
-**跨平台 iPhone 虛擬定位工具，這個 fork 目前以完整 CLI + browser UI 為主。**
-
-這個 fork 的方向很明確：
-
-- **macOS 可跑**
-- **CLI 可直接操作主要功能**
-- 需要圖形介面時，使用 **browser UI** 連 backend
-- 不再把「Windows 打包 Electron app」當成唯一主軸
-
-如果你想把 LocWarp 當成一套真正可腳本化、可自動化、可在 mac 上實際使用的工具，這個 fork 就是往那個方向整理的版本。
-
----
-
-## 快速開始
-
-### 啟動完整服務
-
-```bash
-cd locwarp
-python3 locwarp.py serve --open
-```
-
-### 用舊入口啟動
-
-```bash
-python3 start.py
-```
-
-### mac 直接雙擊
-
-```text
-LocWarp.command
-```
-
-### 只啟 backend
-
-```bash
-python3 locwarp.py serve --backend-only
-```
-
----
-
-## CLI 總覽
-
-```bash
-locwarp serve
-locwarp open
-locwarp device-list
-locwarp device-connect
-locwarp device-info
-locwarp status
-locwarp search
-locwarp real-location
-locwarp teleport
-locwarp navigate
-locwarp loop
-locwarp multistop
-locwarp randomwalk
-locwarp pause
-locwarp resume
-locwarp stop
-locwarp restore
-locwarp recent-list
-locwarp recent-add
-locwarp recent-clear
-locwarp bookmark-list
-locwarp bookmark-add
-locwarp bookmark-delete
-locwarp category-list
-locwarp category-add
-locwarp route-plan
-locwarp route-list
-locwarp route-save
-locwarp route-rename
-locwarp route-delete
-locwarp route-export
-locwarp route-import
-locwarp gpx-import
-locwarp gpx-export
-```
-
-實際執行時請用：
-
-```bash
-python3 locwarp.py <command>
-```
-
----
-
-## 常用流程
-
-### 1. 啟動服務
-
-```bash
-python3 locwarp.py serve --open
-```
-
-### 2. 列出裝置
-
-```bash
-python3 locwarp.py device-list
-```
-
-### 3. 連接裝置
-
-```bash
-python3 locwarp.py device-connect <udid>
-```
-
-### 4. 查地點
-
-```bash
-python3 locwarp.py search 台北101
-```
-
-### 5. 直接跳點
-
-```bash
-python3 locwarp.py teleport 25.033 121.5654
-```
-
-### 6. 開始導航
-
-```bash
-python3 locwarp.py navigate 25.033 121.5654 --mode walking
-```
-
-### 7. 查看狀態
-
-```bash
-python3 locwarp.py status
-```
-
-### 8. 暫停 / 恢復 / 停止 / 還原
-
-```bash
-python3 locwarp.py pause
-python3 locwarp.py resume
-python3 locwarp.py stop
-python3 locwarp.py restore
-```
-
----
-
-## 指令說明
-
-## 啟動與前端
-
-### `serve`
-啟動 backend，必要時也啟 frontend。
-
-```bash
-python3 locwarp.py serve --open
-python3 locwarp.py serve --backend-only
-```
-
-### `open`
-直接打開前端頁面。
-
-```bash
-python3 locwarp.py open
-```
-
----
-
-## 裝置
-
-### `device-list`
-列出已發現裝置。
-
-```bash
-python3 locwarp.py device-list
-```
-
-### `device-connect`
-依 UDID 連接裝置。
-
-```bash
-python3 locwarp.py device-connect <udid>
-```
-
-### `device-info`
-查單一裝置資訊。
-
-```bash
-python3 locwarp.py device-info <udid>
-```
-
----
-
-## 定位與移動
-
-### `status`
-查看目前模擬狀態。
-
-```bash
-python3 locwarp.py status
-python3 locwarp.py status --udid <udid>
-```
-
-### `teleport`
-直接跳到指定座標。
-
-```bash
-python3 locwarp.py teleport 25.033 121.5654
-python3 locwarp.py teleport 25.033 121.5654 --udid <udid>
-```
-
-### `navigate`
-導航到指定座標。
-
-```bash
-python3 locwarp.py navigate 25.033 121.5654 --mode walking
-python3 locwarp.py navigate 25.033 121.5654 --mode driving --speed-kmh 40
-```
-
-### `loop`
-循環路線。
-
-```bash
-python3 locwarp.py loop 25.033,121.5654 25.034,121.5660 25.032,121.5670 --mode walking
-python3 locwarp.py loop 25.033,121.5654 25.034,121.5660 25.032,121.5670 --lap-count 5
-```
-
-### `multistop`
-多點停留。
-
-```bash
-python3 locwarp.py multistop 25.033,121.5654 25.034,121.5660 25.032,121.5670 --stop-duration 10
-```
-
-### `randomwalk`
-以某個中心點為圓心隨機漫步。
-
-```bash
-python3 locwarp.py randomwalk 25.033 121.5654 --radius-m 500
-```
-
-### `pause` / `resume` / `stop` / `restore`
-
-```bash
-python3 locwarp.py pause
-python3 locwarp.py resume
-python3 locwarp.py stop
-python3 locwarp.py restore
-```
-
----
-
-## 地理查詢
-
-### `search`
-搜尋地點。
-
-```bash
-python3 locwarp.py search 台北101
-python3 locwarp.py search "Shibuya Station"
-```
-
-### `real-location`
-查詢目前 public IP 對應的大致真實位置。
-
-```bash
-python3 locwarp.py real-location
-```
-
----
-
-## Recent
-
-### `recent-list`
-
-```bash
-python3 locwarp.py recent-list
-```
-
-### `recent-add`
-
-```bash
-python3 locwarp.py recent-add 25.033 121.5654 --kind teleport --name "Taipei 101"
-```
-
-### `recent-clear`
-
-```bash
-python3 locwarp.py recent-clear
-```
-
----
-
-## Bookmarks
-
-### `bookmark-list`
-
-```bash
-python3 locwarp.py bookmark-list
-```
-
-### `bookmark-add`
-
-```bash
-python3 locwarp.py bookmark-add "Taipei 101" 25.033 121.5654
-python3 locwarp.py bookmark-add "Home" 25.0 121.5 --address "Taipei" --category-id default
-```
-
-### `bookmark-delete`
-
-```bash
-python3 locwarp.py bookmark-delete <bookmark-id>
-```
-
-### `category-list`
-
-```bash
-python3 locwarp.py category-list
-```
-
-### `category-add`
-
-```bash
-python3 locwarp.py category-add "Japan" --color "#ff5a5f"
-```
-
----
-
-## Routes / GPX
-
-### `route-plan`
-規劃兩點間路線。
-
-```bash
-python3 locwarp.py route-plan 25.033 121.5654 25.047 121.517 --profile walking
-```
-
-### `route-list`
-
-```bash
-python3 locwarp.py route-list
-```
-
-### `route-save`
-
-```bash
-python3 locwarp.py route-save "Taipei Loop" 25.033,121.5654 25.034,121.5660 25.032,121.5670 --profile walking
-```
-
-### `route-rename`
-
-```bash
-python3 locwarp.py route-rename <route-id> "New Name"
-```
-
-### `route-delete`
-
-```bash
-python3 locwarp.py route-delete <route-id>
-```
-
-### `route-export`
-
-```bash
-python3 locwarp.py route-export routes.json
-```
-
-### `route-import`
-
-```bash
-python3 locwarp.py route-import routes.json
-```
-
-### `gpx-import`
-
-```bash
-python3 locwarp.py gpx-import my-route.gpx
-```
-
-### `gpx-export`
-
-```bash
-python3 locwarp.py gpx-export <route-id> output.gpx
-```
-
----
-
-## 執行模式
-
-LocWarp 目前有兩層：
-
-1. **backend**
-   - FastAPI
-   - 負責裝置連線、定位模擬、路線控制、配對與 tunnel 流程
-
-2. **frontend**
-   - Vite + React
-   - 透過瀏覽器操作 backend
-
-`locwarp.py` 現在是這個 fork 的統一入口。
-
----
-
-## 平台定位
-
-### 目前最推薦
-
-- macOS: **完整 CLI / browser workflow**
-- Windows: **也可沿用 CLI / browser workflow**
-
-### 目前不是重點
-
-- 原生打包 macOS app
-- 保證所有 Electron 打包流程都跨平台乾淨可用
-
----
-
-## 與上游差異
-
-這個 fork 主要做了這些事：
-
-- 改成 **CLI / browser-first**
-- 補上 **macOS 可跑** 的入口
-- 新增 `locwarp.py` 當統一 CLI 入口
-- `start.py` 改為導向新的 CLI 流程
-- README 依照實際使用方式重寫
-- 把原本分散在 API / frontend 的核心能力整理成 CLI 可直接用的命令
-
----
-
-## 已知限制
-
-- bookmark/category 還沒補 update / move / import/export 指令
-- device disconnect、wifi tunnel、developer mode reveal 這些還能再補 CLI
-- Electron 打包流程仍偏向 Windows
-- Apple / iOS / pymobiledevice3 相容性仍會影響實際控制效果
-
----
+跨平台 iPhone 虛擬定位工具。這個 fork 的重點不是把上游的 Windows Electron 包原樣搬過來，而是把它整理成 **macOS 可用、CLI 可腳本化、browser UI 可直接操作** 的版本。
+
+![LocWarp demo](docs/demo-v2.gif)
+
+## 這個 fork 在做什麼
+
+相較於上游，這個版本更偏向日常實用與自動化：
+
+- 支援 **macOS** 作為主要使用環境
+- 提供 **CLI 入口**，方便腳本、自動化與遠端操作
+- 保留原本的 **browser UI**，不強綁 Electron 視窗
+- 讓 `start.py`、`LocWarp.command`、CLI 都回到同一條啟動路徑
+- 可以視需要選擇性跟進 upstream 的核心修正
+
+如果你想要的是「能在 Mac 上實際用、也能拿來串腳本」的 LocWarp，這個 fork 比較接近這個方向。
+
+## 功能摘要
+
+- iPhone 裝置偵測與連線
+- 即時座標瞬移
+- 導航移動
+- 路線巡迴
+- 多點停留
+- 隨機漫步
+- 暫停、恢復、停止、還原真實位置
+- 地址搜尋 / 地理編碼
+- 收藏點、分類、最近地點
+- 路線儲存、匯入匯出、GPX 匯入匯出
+- Browser UI + CLI 雙入口
 
 ## 專案結構
 
 ```text
 locwarp/
-├── backend/
-├── frontend/
-├── locwarp.py
-├── LocWarp.command
-├── start.py
-└── stop.py
+├─ backend/      FastAPI + pymobiledevice3 後端
+├─ frontend/     Vite / React browser UI
+├─ locwarp.py    統一 CLI 入口
+├─ start.py      舊入口，實際轉呼叫 CLI
+└─ LocWarp.command  macOS 快速啟動腳本
 ```
 
----
+## 系統需求
 
-## License
+建議環境：
 
-MIT
+- macOS 為主，也可自行調整到其他平台
+- Python 3.10+
+- Node.js 18+
+- npm
+- iPhone 已信任電腦
+- 某些情境需要 iPhone 已開啟 Developer Mode
 
----
+後端核心依賴是 `pymobiledevice3`，實際可用性仍會受 iOS 版本、Apple 驅動與配對狀態影響。
 
-## Credits
+## 快速開始
 
-- upstream: `keezxc1223/locwarp`
-- this fork focuses on making the project more practical on macOS and in CLI/browser workflows
+### 1. 下載 repo
+
+```bash
+git clone https://github.com/meteorcyclops/locwarp.git
+cd locwarp
+```
+
+### 2. 啟動完整服務
+
+```bash
+python3 locwarp.py serve --open
+```
+
+這會做幾件事：
+
+- 安裝 backend 需要的 Python 套件
+- 必要時安裝 frontend 的 npm 依賴
+- 啟動 backend，預設 `http://127.0.0.1:8777`
+- 啟動 frontend，預設 `http://127.0.0.1:5173`
+- 自動打開瀏覽器
+
+### 3. 只啟 backend
+
+```bash
+python3 locwarp.py serve --backend-only
+```
+
+### 4. 用舊入口啟動
+
+```bash
+python3 start.py
+```
+
+### 5. macOS 直接雙擊
+
+```text
+LocWarp.command
+```
+
+## 常用 CLI
+
+實際執行格式：
+
+```bash
+python3 locwarp.py <command>
+```
+
+### 裝置
+
+```bash
+python3 locwarp.py device-list
+python3 locwarp.py device-connect <udid>
+python3 locwarp.py device-info <udid>
+```
+
+### 查地點與目前狀態
+
+```bash
+python3 locwarp.py search "Taipei 101"
+python3 locwarp.py real-location
+python3 locwarp.py status
+```
+
+### 瞬移與移動
+
+```bash
+python3 locwarp.py teleport 25.033 121.5654
+python3 locwarp.py navigate 25.033 121.5654 --mode walking
+python3 locwarp.py loop 25.033,121.5654 25.034,121.5660 25.032,121.5670 --mode walking
+python3 locwarp.py multistop 25.033,121.5654 25.034,121.5660 25.032,121.5670 --stop-duration 10
+python3 locwarp.py randomwalk 25.033 121.5654 --radius-m 500
+```
+
+### 控制目前模擬
+
+```bash
+python3 locwarp.py pause
+python3 locwarp.py resume
+python3 locwarp.py stop
+python3 locwarp.py restore
+```
+
+### 收藏 / 最近地點 / 路線
+
+```bash
+python3 locwarp.py recent-list
+python3 locwarp.py bookmark-list
+python3 locwarp.py category-list
+python3 locwarp.py route-list
+python3 locwarp.py route-export routes.json
+python3 locwarp.py gpx-import my-route.gpx
+```
+
+完整指令請直接看：
+
+```bash
+python3 locwarp.py --help
+```
+
+## Browser UI
+
+`serve --open` 啟動後，可直接用瀏覽器操作前端。
+
+- Frontend: `http://127.0.0.1:5173`
+- Backend API docs: `http://127.0.0.1:8777/docs`
+
+這個 fork 的 UI 定位是「保留好用的圖形操作」，但不強迫你一定要用封裝好的桌面 app。
+
+## 與上游的差異
+
+這個 repo 不追求完全照搬 upstream release，而是偏向：
+
+- 保留 upstream 可用的核心邏輯
+- 補上 macOS 實際使用流程
+- 提供 CLI-first 的操作方式
+- 視需要挑選 upstream 修正來同步
+
+所以這裡看到的版本、啟動方式、README 與上游 release 可能不完全一致，這是刻意的。
+
+## 相容性與注意事項
+
+- Apple / iOS / `pymobiledevice3` 相容性仍然會影響實際效果
+- WiFi 配對、USB 連線、DDI / Developer Mode 狀態都可能影響能不能成功控制
+- 某些 upstream 新功能可能先做在 Windows/Electron 流程，這個 fork 會視情況再整合
+- 若你是拿這個 repo 自行包成 macOS app，請把它視為另一層包裝，不等同 upstream 官方 release
+
+## 開發備註
+
+前端目前仍保留上游的 Electron 打包設定，但這個 fork 的主要使用方式是：
+
+- backend 直接跑 Python
+- frontend 直接跑 Vite
+- 透過瀏覽器操作 UI
+- 透過 `locwarp.py` 統一腳本入口
+
+## 授權
+
+沿用原專案授權，詳見 [LICENSE](LICENSE)。
