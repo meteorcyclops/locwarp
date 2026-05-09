@@ -277,8 +277,9 @@ async function startBackendElevatedMac(exe) {
   const command = [
     'mkdir -p', shellQuote(backendRuntimeDir()),
     '&& : >', shellQuote(logFile),
-    '&& nohup', shellQuote(exe), '>', shellQuote(logFile), '2>&1',
-    '& echo $! >', shellQuote(pidFile),
+    '&& cd', shellQuote(path.dirname(exe)),
+    '&&', shellQuote(exe), '</dev/null', '>', shellQuote(logFile), '2>&1', '&',
+    'echo $! >', shellQuote(pidFile),
   ].join(' ')
   const script = `do shell script ${JSON.stringify(command)} with administrator privileges`
   await runAppleScript(script)
