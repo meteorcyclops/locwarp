@@ -1,4 +1,5 @@
 const { app, BrowserWindow, Menu, shell, ipcMain } = require('electron')
+const fs = require('fs')
 const path = require('path')
 const { spawn } = require('child_process')
 const http = require('http')
@@ -210,18 +211,31 @@ let mainWindow
 let backendProc = null
 
 function resolveBackendExe() {
-  // In a packaged build, extraResources places files under process.resourcesPath
-  // (e.g.  .../resources/backend/locwarp-backend.exe).  In dev, we don't spawn;
-  // the developer runs `python main.py` manually.
-  if (app.isPackaged) {
-    return path.join(process.resourcesPath, 'backend', 'locwarp-backend.exe')
+  // In a packaged build, extraResources places files under process.resourcesPath.
+  // Prefer the platform-native filename, but fall back to the alternate name
+  // so a stale/mismatched package fails more gracefully.
+  if (!app.isPackaged) return null
+
+  const backendDir = path.join(process.resourcesPath, 'backend')
+  const candidates = process.platform === 'win32'
+    ? ['locwarp-backend.exe', 'locwarp-backend']
+    : ['locwarp-backend', 'locwarp-backend.exe']
+
+  for (const name of candidates) {
+    const candidate = path.join(backendDir, name)
+    if (fs.existsSync(candidate)) return candidate
   }
+
+  console.error('[electron] backend binary not found in', backendDir, 'candidates:', candidates)
   return null
 }
 
 function startBackend() {
   const exe = resolveBackendExe()
-  if (!exe) return
+  if (!exe) {
+    console.error('[electron] backend spawn skipped: executable not found')
+    return
+  }
   console.log('[electron] spawning backend:', exe)
   backendProc = spawn(exe, [], {
     cwd: path.dirname(exe),
