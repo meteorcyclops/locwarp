@@ -203,9 +203,26 @@ ipcMain.handle('locate-pc', async () => {
   }
 })
 
-// Strip the default "File Edit View Window Help" menubar — LocWarp has its
-// own in-window controls and the native menu only adds noise on Windows.
-Menu.setApplicationMenu(null)
+// Keep the menu visually hidden, but restore native edit roles so
+// Windows/Linux keyboard shortcuts like Ctrl+C / Ctrl+V still work inside
+// inputs after packaging.
+Menu.setApplicationMenu(Menu.buildFromTemplate([
+  {
+    label: 'Edit',
+    submenu: [
+      { role: 'undo' },
+      { role: 'redo' },
+      { type: 'separator' },
+      { role: 'cut' },
+      { role: 'copy' },
+      { role: 'paste' },
+      { role: 'pasteAndMatchStyle' },
+      { role: 'delete' },
+      { type: 'separator' },
+      { role: 'selectAll' },
+    ],
+  },
+]))
 
 let mainWindow
 let backendProc = null
@@ -309,6 +326,7 @@ async function createWindow() {
     minWidth: 900,
     minHeight: 600,
     title: 'LocWarp',
+    autoHideMenuBar: true,
     // Match the app's dark theme so the initial frame isn't white while
     // the renderer attaches — previously caused a jarring white flash.
     backgroundColor: '#0f1117',

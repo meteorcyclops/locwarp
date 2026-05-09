@@ -10,6 +10,10 @@ import SettingsModal from './SettingsModal';
 import pkg from '../../package.json';
 import { WeatherIcon, categorize, labelKeyFor } from './WeatherIcon';
 import { useUpdateCheck } from './UpdateChecker';
+import { writeClipboardText } from '../utils/clipboard';
+
+const DEVICE_COLORS = ['#4285f4', '#ff9800'];
+const DEVICE_LETTERS = ['A', 'B'];
 
 const APP_VERSION = (pkg as { version: string }).version;
 
@@ -287,12 +291,10 @@ const StatusBar: React.FC<StatusBarProps> = ({
             )}
             <span>{currentPosition.lat.toFixed(6)}, {currentPosition.lng.toFixed(6)}</span>
             <button
-              onClick={() => {
+              onClick={async () => {
                 const txt = `${currentPosition.lat.toFixed(6)}, ${currentPosition.lng.toFixed(6)}`;
-                navigator.clipboard.writeText(txt).then(
-                  () => setCopied(true),
-                  () => setCopied(false),
-                );
+                const ok = await writeClipboardText(txt);
+                setCopied(ok);
                 setTimeout(() => setCopied(false), 1500);
               }}
               title={t('status.copy_coord')}

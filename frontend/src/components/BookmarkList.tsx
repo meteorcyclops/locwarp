@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { useT } from '../i18n';
 import { getBookmarkUiState, setBookmarkUiState } from '../services/api';
+import { writeClipboardText } from '../utils/clipboard';
 
 const AUTO_COLLAPSE_THRESHOLD = 30;
 
@@ -1500,17 +1501,7 @@ const BookmarkList: React.FC<BookmarkListProps> = ({
               onMouseLeave={ctxUnhighlight}
               onClick={async () => {
                 const text = `${contextMenu.bm.name} ${contextMenu.bm.lat.toFixed(6)}, ${contextMenu.bm.lng.toFixed(6)}`;
-                try {
-                  await navigator.clipboard.writeText(text);
-                } catch {
-                  // Fallback for environments without clipboard API
-                  const ta = document.createElement('textarea');
-                  ta.value = text;
-                  document.body.appendChild(ta);
-                  ta.select();
-                  try { document.execCommand('copy'); } catch { /* ignore */ }
-                  document.body.removeChild(ta);
-                }
+                await writeClipboardText(text);
                 setContextMenu(null);
               }}
             >

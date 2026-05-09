@@ -23,6 +23,10 @@ declare global {
       getRenderMode(): Promise<RenderModeInfo>
       setRenderMode(mode: RenderMode): Promise<{ ok: boolean }>
       relaunchApp(): Promise<void>
+      clipboard?: {
+        readText(): Promise<string> | string
+        writeText(text: string): Promise<void> | void
+      }
     }
   }
 }

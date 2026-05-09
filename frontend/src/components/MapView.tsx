@@ -1,6 +1,7 @@
 import React, { useRef, useEffect, useLayoutEffect, useState, useCallback } from 'react';
 import { useT } from '../i18n';
 import { reverseGeocode } from '../services/api';
+import { readClipboardText, writeClipboardText } from '../utils/clipboard';
 import L from 'leaflet';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import maplibregl from 'maplibre-gl';
@@ -1766,6 +1767,7 @@ const MapView: React.FC<MapViewProps> = ({
   // prefixes are all discarded so users don't have to hand-clean copies
   // from Google Maps / chat / spreadsheets.
   const [coordInput, setCoordInput] = useState('');
+  const coordInputRef = useRef<HTMLInputElement | null>(null);
   // Lifts the coord-input strip to clear the bottom status bar. The
   // status bar wraps to extra rows when the window narrows (flexWrap),
   // so its rendered height varies. We observe it directly so the strip
@@ -1922,10 +1924,34 @@ const MapView: React.FC<MapViewProps> = ({
             <circle cx="12" cy="10" r="3" />
           </svg>
           <input
+            ref={coordInputRef}
             type="text"
             value={coordInput}
             onChange={(e) => setCoordInput(e.target.value)}
-            onKeyDown={(e) => { if (e.key === 'Enter') submitCoordGo('teleport'); }}
+            onKeyDown={async (e) => {
+              if (e.key === 'Enter') {
+                submitCoordGo('teleport');
+                return;
+              }
+              if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v' && window.electronAPI?.clipboard?.readText) {
+                e.preventDefault();
+                try {
+                  const pasted = (await readClipboardText()).trim();
+                  if (!pasted) return;
+                  const input = e.currentTarget;
+                  const start = input.selectionStart ?? input.value.length;
+                  const end = input.selectionEnd ?? input.value.length;
+                  const next = `${input.value.slice(0, start)}${pasted}${input.value.slice(end)}`;
+                  setCoordInput(next);
+                  requestAnimationFrame(() => {
+                    const caret = start + pasted.length;
+                    coordInputRef.current?.setSelectionRange(caret, caret);
+                  });
+                } catch {
+                  if (onShowToast) onShowToast(tRef.current('panel.paste_denied'));
+                }
+              }
+            }}
             placeholder={tRef.current('panel.coord_placeholder')}
             style={{
               width: 210, background: 'transparent', border: 'none',
@@ -1936,7 +1962,7 @@ const MapView: React.FC<MapViewProps> = ({
           <button
             onClick={async () => {
               try {
-                const text = await navigator.clipboard.readText();
+                const text = await readClipboardText();
                 if (text) setCoordInput(text.trim());
               } catch {
                 if (onShowToast) onShowToast(tRef.current('panel.paste_denied'));
@@ -2502,16 +2528,7 @@ const MapView: React.FC<MapViewProps> = ({
             onMouseLeave={unhighlightItem}
             onClick={async () => {
               const txt = `${contextMenu.lat.toFixed(6)}, ${contextMenu.lng.toFixed(6)}`;
-              try {
-                await navigator.clipboard.writeText(txt);
-              } catch {
-                const ta = document.createElement('textarea');
-                ta.value = txt;
-                document.body.appendChild(ta);
-                ta.select();
-                try { document.execCommand('copy'); } catch { /* ignore */ }
-                document.body.removeChild(ta);
-              }
+              await writeClipboardText(txt);
               if (onShowToast) onShowToast(tRef.current('map.coords_copied'));
               closeContextMenu();
             }}
