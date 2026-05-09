@@ -1,7 +1,7 @@
-const { app, BrowserWindow, Menu, shell, ipcMain } = require('electron')
+const { app, BrowserWindow, Menu, shell, ipcMain, dialog } = require('electron')
 const fs = require('fs')
 const path = require('path')
-const { spawn } = require('child_process')
+const { spawn, execFile } = require('child_process')
 const http = require('http')
 const os = require('os')
 const fs = require('fs')
@@ -226,6 +226,83 @@ Menu.setApplicationMenu(Menu.buildFromTemplate([
 
 let mainWindow
 let backendProc = null
+let backendLogTail = null
+
+const backendRuntimeDir = () => path.join(app.getPath('userData'), 'backend-runtime')
+const backendPidFile = () => path.join(backendRuntimeDir(), 'backend.pid')
+const backendLogFile = () => path.join(backendRuntimeDir(), 'backend.log')
+
+const ensureBackendRuntimeDir = () => {
+  fs.mkdirSync(backendRuntimeDir(), { recursive: true })
+}
+
+const shellQuote = (value) => `'${String(value).replace(/'/g, `'\\''`)}'`
+
+function tailBackendLog() {
+  if (backendLogTail || process.platform !== 'darwin') return
+  const logFile = backendLogFile()
+  if (!fs.existsSync(logFile)) return
+  backendLogTail = spawn('tail', ['-n', '0', '-F', logFile], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
+  })
+  backendLogTail.stdout.on('data', (d) => process.stdout.write(`[backend] ${d}`))
+  backendLogTail.stderr.on('data', (d) => process.stderr.write(`[backend] ${d}`))
+  backendLogTail.on('exit', () => { backendLogTail = null })
+}
+
+function stopBackendLogTail() {
+  if (!backendLogTail) return
+  try { backendLogTail.kill() } catch {}
+  backendLogTail = null
+}
+
+function runAppleScript(script) {
+  return new Promise((resolve, reject) => {
+    execFile('osascript', ['-e', script], (error, stdout, stderr) => {
+      if (error) {
+        const extra = (stderr || stdout || error.message || '').trim()
+        return reject(new Error(extra || 'osascript failed'))
+      }
+      resolve((stdout || '').trim())
+    })
+  })
+}
+
+async function startBackendElevatedMac(exe) {
+  ensureBackendRuntimeDir()
+  await stopBackendElevatedMac()
+  const pidFile = backendPidFile()
+  const logFile = backendLogFile()
+  const command = [
+    'mkdir -p', shellQuote(backendRuntimeDir()),
+    '&& : >', shellQuote(logFile),
+    '&& nohup', shellQuote(exe), '>', shellQuote(logFile), '2>&1',
+    '& echo $! >', shellQuote(pidFile),
+  ].join(' ')
+  const script = `do shell script ${JSON.stringify(command)} with administrator privileges`
+  await runAppleScript(script)
+  tailBackendLog()
+}
+
+async function stopBackendElevatedMac() {
+  stopBackendLogTail()
+  const pidFile = backendPidFile()
+  if (!fs.existsSync(pidFile)) return
+  const command = [
+    'if [ -f', shellQuote(pidFile), ']; then',
+    'PID=$(cat', shellQuote(pidFile), '2>/dev/null);',
+    'if [ -n "$PID" ]; then kill "$PID" 2>/dev/null || true; fi;',
+    'rm -f', shellQuote(pidFile), ';',
+    'fi'
+  ].join(' ')
+  const script = `do shell script ${JSON.stringify(command)} with administrator privileges`
+  try {
+    await runAppleScript(script)
+  } catch (e) {
+    console.error('[electron] failed to stop elevated backend:', e.message)
+  }
+}
 
 function resolveBackendExe() {
   // In a packaged build, extraResources places files under process.resourcesPath.
@@ -247,13 +324,24 @@ function resolveBackendExe() {
   return null
 }
 
-function startBackend() {
+async function startBackend() {
   const exe = resolveBackendExe()
   if (!exe) {
     console.error('[electron] backend spawn skipped: executable not found')
     return
   }
   console.log('[electron] spawning backend:', exe)
+
+  if (process.platform === 'darwin') {
+    try {
+      await startBackendElevatedMac(exe)
+      return
+    } catch (e) {
+      console.error('[electron] elevated backend start failed:', e.message)
+      throw e
+    }
+  }
+
   backendProc = spawn(exe, [], {
     cwd: path.dirname(exe),
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -267,7 +355,11 @@ function startBackend() {
   })
 }
 
-function stopBackend() {
+async function stopBackend() {
+  if (process.platform === 'darwin') {
+    await stopBackendElevatedMac()
+    return
+  }
   if (!backendProc) return
   try { backendProc.kill() } catch {}
   backendProc = null
@@ -360,19 +452,22 @@ async function createWindow() {
   if (isDev) {
     mainWindow.loadURL('http://localhost:5173')
   } else {
-    // Spawn the backend in parallel and load the UI immediately. The
-    // renderer already has fetch-with-retry so it rides out the backend
-    // startup race — no need to block loadFile on waitForBackend() and
-    // stare at a blank window for seconds.
-    startBackend()
+    // Spawn the backend in parallel and load the UI immediately. On macOS,
+    // only the backend is elevated so the renderer keeps the normal user
+    // session clipboard / window permissions.
+    try {
+      await startBackend()
+    } catch (e) {
+      dialog.showErrorBox('LocWarp backend failed to start', String(e.message || e))
+    }
     mainWindow.loadFile(path.join(__dirname, '../dist/index.html'))
   }
 }
 
 app.whenReady().then(createWindow)
-app.on('window-all-closed', () => {
-  stopBackend()
+app.on('window-all-closed', async () => {
+  await stopBackend()
   if (process.platform !== 'darwin') app.quit()
 })
-app.on('before-quit', stopBackend)
+app.on('before-quit', () => { void stopBackend() })
 app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow() })
