@@ -1767,7 +1767,6 @@ const MapView: React.FC<MapViewProps> = ({
   // prefixes are all discarded so users don't have to hand-clean copies
   // from Google Maps / chat / spreadsheets.
   const [coordInput, setCoordInput] = useState('');
-  const coordInputRef = useRef<HTMLInputElement | null>(null);
   // Lifts the coord-input strip to clear the bottom status bar. The
   // status bar wraps to extra rows when the window narrows (flexWrap),
   // so its rendered height varies. We observe it directly so the strip
@@ -1924,32 +1923,12 @@ const MapView: React.FC<MapViewProps> = ({
             <circle cx="12" cy="10" r="3" />
           </svg>
           <input
-            ref={coordInputRef}
             type="text"
             value={coordInput}
             onChange={(e) => setCoordInput(e.target.value)}
-            onKeyDown={async (e) => {
+            onKeyDown={(e) => {
               if (e.key === 'Enter') {
                 submitCoordGo('teleport');
-                return;
-              }
-              if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v' && window.electronAPI?.clipboard?.readText) {
-                e.preventDefault();
-                try {
-                  const pasted = (await readClipboardText()).trim();
-                  if (!pasted) return;
-                  const input = e.currentTarget;
-                  const start = input.selectionStart ?? input.value.length;
-                  const end = input.selectionEnd ?? input.value.length;
-                  const next = `${input.value.slice(0, start)}${pasted}${input.value.slice(end)}`;
-                  setCoordInput(next);
-                  requestAnimationFrame(() => {
-                    const caret = start + pasted.length;
-                    coordInputRef.current?.setSelectionRange(caret, caret);
-                  });
-                } catch {
-                  if (onShowToast) onShowToast(tRef.current('panel.paste_denied'));
-                }
               }
             }}
             placeholder={tRef.current('panel.coord_placeholder')}

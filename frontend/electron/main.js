@@ -271,11 +271,15 @@ function runAppleScript(script) {
 
 async function startBackendElevatedMac(exe) {
   ensureBackendRuntimeDir()
-  await stopBackendElevatedMac()
   const pidFile = backendPidFile()
   const logFile = backendLogFile()
   const command = [
     'mkdir -p', shellQuote(backendRuntimeDir()),
+    '&& if [ -f', shellQuote(pidFile), ']; then',
+    'PID=$(cat', shellQuote(pidFile), '2>/dev/null);',
+    'if [ -n "$PID" ]; then kill "$PID" 2>/dev/null || true; fi;',
+    'rm -f', shellQuote(pidFile), ';',
+    'fi',
     '&& : >', shellQuote(logFile),
     '&& cd', shellQuote(path.dirname(exe)),
     '&&', shellQuote(exe), '</dev/null', '>', shellQuote(logFile), '2>&1', '&',
@@ -325,6 +329,20 @@ function resolveBackendExe() {
   return null
 }
 
+async function isBackendReachable(timeoutMs = 1200) {
+  return new Promise((resolve) => {
+    const req = http.get('http://127.0.0.1:8777/docs', (res) => {
+      res.destroy()
+      resolve(true)
+    })
+    req.on('error', () => resolve(false))
+    req.setTimeout(timeoutMs, () => {
+      try { req.destroy() } catch {}
+      resolve(false)
+    })
+  })
+}
+
 async function startBackend() {
   const exe = resolveBackendExe()
   if (!exe) {
@@ -332,6 +350,11 @@ async function startBackend() {
     return
   }
   console.log('[electron] spawning backend:', exe)
+
+  if (await isBackendReachable()) {
+    tailBackendLog()
+    return
+  }
 
   if (process.platform === 'darwin') {
     try {
@@ -466,9 +489,11 @@ async function createWindow() {
 }
 
 app.whenReady().then(createWindow)
-app.on('window-all-closed', async () => {
-  await stopBackend()
-  if (process.platform !== 'darwin') app.quit()
+app.on('window-all-closed', () => {
+  if (process.platform !== 'darwin') {
+    void stopBackend()
+    app.quit()
+  }
 })
 app.on('before-quit', () => { void stopBackend() })
 app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow() })

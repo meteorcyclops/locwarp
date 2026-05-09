@@ -433,7 +433,7 @@ export const STRINGS = {
   'panel.coord_preview_tooltip': { zh: '只把畫面瞬移過去看看,不改變 iPhone 的 GPS 定位', en: 'Pan the map to this coordinate without moving the iPhone GPS' },
   'panel.paste': { zh: '貼上', en: 'Paste' },
   'panel.paste_tooltip': { zh: '從剪貼簿貼上座標', en: 'Paste coordinates from clipboard' },
-  'panel.paste_denied': { zh: '無法讀取剪貼簿,請改用 Ctrl+V', en: 'Clipboard read denied — use Ctrl+V instead' },
+  'panel.paste_denied': { zh: '無法直接讀取剪貼簿，請在欄位內用 ⌘V / Ctrl+V 貼上', en: 'Cannot read clipboard directly — paste in the field with Cmd+V / Ctrl+V instead' },
 
   // ── EtaBar ───────────────────────────────────
   'eta.remaining': { zh: '剩餘', en: 'Remaining' },
