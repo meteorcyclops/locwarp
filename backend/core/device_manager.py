@@ -17,6 +17,7 @@ access DVT services.  This requires administrator privileges on Windows.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import socket
 from dataclasses import dataclass, field
@@ -391,7 +392,9 @@ class DeviceManager:
         # Close tunnel proxy.
         if conn.tunnel_proxy is not None:
             try:
-                conn.tunnel_proxy.close()
+                maybe_awaitable = conn.tunnel_proxy.close()
+                if inspect.isawaitable(maybe_awaitable):
+                    await maybe_awaitable
             except Exception:
                 logger.exception("Error closing tunnel proxy for %s", udid)
 
