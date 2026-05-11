@@ -90,6 +90,13 @@ const App: React.FC = () => {
     setGoldDittoARaw(v)
     try { localStorage.setItem('locwarp.goldditto.a', v) } catch { /* ignore */ }
   }, [])
+  const [goldDittoHoldMs, setGoldDittoHoldMsRaw] = useState<string>(() => {
+    try { return localStorage.getItem('locwarp.goldditto.hold_ms') ?? '500' } catch { return '500' }
+  })
+  const setGoldDittoHoldMs = useCallback((v: string) => {
+    setGoldDittoHoldMsRaw(v)
+    try { localStorage.setItem('locwarp.goldditto.hold_ms', v) } catch { /* ignore */ }
+  }, [])
   const [goldDittoBusy, setGoldDittoBusy] = useState(false)
   const [showBookmarkPins, setShowBookmarkPinsRaw] = useState<boolean>(() => {
     try { return localStorage.getItem('locwarp.show_bookmark_pins') === '1' } catch { return false }
@@ -872,14 +879,24 @@ const App: React.FC = () => {
       showToast(t('goldditto.toast.invalid_a'))
       return
     }
+    const holdRaw = goldDittoHoldMs.trim()
+    if (!/^\d+$/.test(holdRaw)) {
+      showToast(t('goldditto.toast.invalid_hold'))
+      return
+    }
+    const holdMs = parseInt(holdRaw, 10)
+    if (!Number.isFinite(holdMs) || holdMs < 0 || holdMs > 5000) {
+      showToast(t('goldditto.toast.invalid_hold'))
+      return
+    }
     const udids = device.connectedDevices.map((d) => d.udid)
     setGoldDittoBusy(true)
     try {
       if (udids.length >= 2) {
-        const outcome = await sim.goldDittoCycleAll(udids, lat, lng)
+        const outcome = await sim.goldDittoCycleAll(udids, lat, lng, holdMs)
         showToast(toastForFanout(t, t('mode.goldditto'), outcome, device.connectedDevices))
       } else {
-        await sim.goldDittoCycle(lat, lng)
+        await sim.goldDittoCycle(lat, lng, holdMs)
         showToast(t('goldditto.toast.restored'))
       }
     } catch {
@@ -887,7 +904,7 @@ const App: React.FC = () => {
     } finally {
       setGoldDittoBusy(false)
     }
-  }, [goldDittoA, sim, device, t, showToast])
+  }, [goldDittoA, goldDittoHoldMs, sim, device, t, showToast])
 
   const handleStartWaypointRoute = useCallback(async () => {
     // UI waypoint list already includes the current position as index 0
@@ -1629,6 +1646,8 @@ const App: React.FC = () => {
           onForwardWalkChange={sim.setForwardWalk}
           goldDittoA={goldDittoA}
           onGoldDittoAChange={setGoldDittoA}
+          goldDittoHoldMs={goldDittoHoldMs}
+          onGoldDittoHoldMsChange={setGoldDittoHoldMs}
           onGoldDittoStart={handleGoldDittoStart}
           goldDittoBusy={goldDittoBusy}
           currentWaypointsCount={sim.waypoints.length}

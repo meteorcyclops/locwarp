@@ -128,6 +128,8 @@ interface ControlPanelProps {
   onForwardWalkChange?: (v: { enabled: boolean; turnDeg: number }) => void;
   goldDittoA?: string;
   onGoldDittoAChange?: (v: string) => void;
+  goldDittoHoldMs?: string;
+  onGoldDittoHoldMsChange?: (v: string) => void;
   onGoldDittoStart?: () => void;
   goldDittoBusy?: boolean;
   modeExtraSection?: React.ReactNode;
@@ -313,6 +315,8 @@ const ControlPanel: React.FC<ControlPanelProps> = ({
   onForwardWalkChange,
   goldDittoA = '',
   onGoldDittoAChange,
+  goldDittoHoldMs = '500',
+  onGoldDittoHoldMsChange,
   onGoldDittoStart,
   goldDittoBusy = false,
   modeExtraSection,
@@ -840,6 +844,26 @@ const ControlPanel: React.FC<ControlPanelProps> = ({
                   </svg>
                 )}
               </button>
+            </div>
+            <label style={{ display: 'block', fontSize: 11, opacity: 0.8, marginBottom: 4 }}>
+              {t('goldditto.hold_label')}
+              <span style={{ marginLeft: 6, fontSize: 10, opacity: 0.6 }}>
+                {t('goldditto.hold_hint')}
+              </span>
+            </label>
+            <div style={{ display: 'flex', gap: 6, alignItems: 'center', marginBottom: 8 }}>
+              <input
+                type="number"
+                min={0}
+                max={5000}
+                step={50}
+                className="search-input"
+                value={goldDittoHoldMs}
+                placeholder={t('goldditto.hold_placeholder')}
+                onChange={(e) => onGoldDittoHoldMsChange?.(e.target.value)}
+                style={{ width: '100%' }}
+              />
+              <span style={{ fontSize: 11, opacity: 0.7, whiteSpace: 'nowrap' }}>ms</span>
             </div>
             <button
               className="action-btn primary"

@@ -489,7 +489,7 @@ async def goldditto_cycle(req: GoldDittoCycleRequest):
 
     async def _do_cycle():
         eng = await _engine(action_udid)
-        await eng.goldditto_cycle(req.lat, req.lng)
+        await eng.goldditto_cycle(req.lat, req.lng, req.hold_ms)
 
     try:
         await _try_with_recovery_retry(action_udid, _do_cycle)

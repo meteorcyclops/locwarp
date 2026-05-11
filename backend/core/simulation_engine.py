@@ -417,9 +417,9 @@ class SimulationEngine:
         """Stop everything and clear the simulated location."""
         await self._restore_handler.restore()
 
-    async def goldditto_cycle(self, lat: float, lng: float) -> None:
-        """Pikmin-Bloom 拉金盆: teleport to A, then immediately restore."""
-        await self._goldditto_handler.cycle(lat, lng)
+    async def goldditto_cycle(self, lat: float, lng: float, hold_ms: int = 500) -> None:
+        """Pikmin-Bloom 拉金盆: teleport to A, hold briefly, then restore."""
+        await self._goldditto_handler.cycle(lat, lng, hold_ms)
 
     async def live_insert_waypoint(
         self, after_index: int, lat: float, lng: float,

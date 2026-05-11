@@ -803,10 +803,10 @@ export function useSimulation(subscribe?: WsSubscribe, primaryUdid?: string | nu
     }
   }, [])
 
-  const goldDittoCycle = useCallback(async (lat: number, lng: number) => {
+  const goldDittoCycle = useCallback(async (lat: number, lng: number, holdMs = 500) => {
     setError(null)
     try {
-      return await api.goldDittoCycle(lat, lng)
+      return await api.goldDittoCycle(lat, lng, holdMs)
     } catch (err: any) {
       setError(err.message)
       throw err
@@ -964,8 +964,8 @@ export function useSimulation(subscribe?: WsSubscribe, primaryUdid?: string | nu
     // Keep effectiveSpeed so status bar shows last-applied speed after restore-all.
     return outcome
   }, [fanout])
-  const goldDittoCycleAll = useCallback((udids: string[], lat: number, lng: number) =>
-    fanout(udids, 'goldditto', (u) => api.goldDittoCycle(lat, lng, u)), [fanout])
+  const goldDittoCycleAll = useCallback((udids: string[], lat: number, lng: number, holdMs = 500) =>
+    fanout(udids, 'goldditto', (u) => api.goldDittoCycle(lat, lng, holdMs, u)), [fanout])
   const joystickStartAll = useCallback(async (udids: string[]) => {
     await preSyncStart(udids)
     return fanout(udids, 'joystick-start', (u) => api.joystickStart(moveMode, u))

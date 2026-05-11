@@ -150,6 +150,7 @@ class JoystickInput(BaseModel):
 class GoldDittoCycleRequest(BaseModel):
     lat: float = Field(ge=-90.0, le=90.0)
     lng: float = Field(ge=-180.0, le=180.0)
+    hold_ms: int = Field(default=500, ge=0, le=5000)
     udid: str | None = None
 
 
