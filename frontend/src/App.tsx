@@ -98,6 +98,7 @@ const App: React.FC = () => {
     try { localStorage.setItem('locwarp.goldditto.hold_ms', v) } catch { /* ignore */ }
   }, [])
   const [goldDittoBusy, setGoldDittoBusy] = useState(false)
+  const [restartBackendBusy, setRestartBackendBusy] = useState(false)
   const [showBookmarkPins, setShowBookmarkPinsRaw] = useState<boolean>(() => {
     try { return localStorage.getItem('locwarp.show_bookmark_pins') === '1' } catch { return false }
   })
@@ -1256,6 +1257,40 @@ const App: React.FC = () => {
       showToast(t('status.open_log_failed') + (err?.message ? `: ${err.message}` : ''))
     }
   }, [showToast, t])
+
+  const handleRestartBackend = useCallback(async () => {
+    const desktopApi = (typeof window !== 'undefined') ? window.electronAPI : undefined
+    if (!desktopApi?.restartBackend) {
+      showToast(t('status.restart_backend_unavailable'))
+      return
+    }
+
+    setRestartBackendBusy(true)
+    showToast(t('status.restart_backend_in_progress'), 15000)
+
+    try {
+      await desktopApi.restartBackend()
+
+      let foundDevices = 0
+      for (const delay of [700, 1400, 2200]) {
+        await new Promise((resolve) => setTimeout(resolve, delay))
+        const list = await device.scan()
+        foundDevices = list.length
+        if (foundDevices > 0) break
+      }
+
+      showToast(
+        foundDevices > 0
+          ? t('status.restart_backend_success')
+          : t('status.restart_backend_success_waiting_device'),
+        6000,
+      )
+    } catch (err: any) {
+      showToast(t('status.restart_backend_failed') + (err?.message ? `: ${err.message}` : ''), 8000)
+    } finally {
+      setRestartBackendBusy(false)
+    }
+  }, [device, showToast, t])
 
   const handleBookmarkImport = useCallback(async (file: File) => {
     try {
@@ -2599,6 +2634,8 @@ const App: React.FC = () => {
           onRestore={handleRestore}
           onOpenLog={handleOpenLog}
           onOpenSettings={() => setActivePage('settings')}
+          onRestartBackend={handleRestartBackend}
+          restartBackendBusy={restartBackendBusy}
           dualDevice={device.connectedDevices.length >= 2}
           countryCode={locMeta.countryCode}
           cityName={locMeta.cityName}

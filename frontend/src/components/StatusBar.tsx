@@ -35,6 +35,8 @@ interface StatusBarProps {
   onRestore?: () => void;
   onOpenLog?: () => void;
   onOpenSettings?: () => void;
+  onRestartBackend?: () => void;
+  restartBackendBusy?: boolean;
   onOpenAvatarPicker?: () => void;
   // "Locate PC" button: detects this PC's lat/lng via the browser
   // geolocation API (Wi-Fi positioning under the hood), then asks the
@@ -106,6 +108,8 @@ const StatusBar: React.FC<StatusBarProps> = ({
   onRestore,
   onOpenLog,
   onOpenSettings,
+  onRestartBackend,
+  restartBackendBusy = false,
   onOpenAvatarPicker,
   onLocatePcFly,
   onLocatePcPanOnly,
@@ -451,6 +455,32 @@ const StatusBar: React.FC<StatusBarProps> = ({
             </svg>
             {dualDevice ? t('status.restore_all') : t('status.restore')}
           </button>
+          {onRestartBackend && (
+            <button
+              onClick={onRestartBackend}
+              disabled={restartBackendBusy}
+              title={t('status.restart_backend_tooltip')}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 4,
+                padding: '2px 8px',
+                fontSize: 12,
+                background: 'rgba(255, 112, 67, 0.12)',
+                border: '1px solid rgba(255, 112, 67, 0.4)',
+                color: '#ff7043',
+                borderRadius: 4,
+                cursor: restartBackendBusy ? 'wait' : 'pointer',
+                opacity: restartBackendBusy ? 0.72 : 1,
+              }}
+            >
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M21 12a9 9 0 1 1-3.2-6.9" />
+                <polyline points="21 3 21 9 15 9" />
+              </svg>
+              {restartBackendBusy ? t('status.restart_backend_busy') : t('status.restart_backend')}
+            </button>
+          )}
           {/* Log 資料夾 + 起始地圖位置 moved to the Settings page (issue #34). */}
           {/* Locate PC: detect this PC's lat/lng (Wi-Fi positioning) */}
           {(onLocatePcFly || onLocatePcPanOnly) && (

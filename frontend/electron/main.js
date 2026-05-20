@@ -227,6 +227,7 @@ Menu.setApplicationMenu(Menu.buildFromTemplate([
 let mainWindow
 let backendProc = null
 let backendLogTail = null
+const BACKEND_PORT = 8777
 
 const backendRuntimeDir = () => path.join(app.getPath('userData'), 'backend-runtime')
 const backendPidFile = () => path.join(backendRuntimeDir(), 'backend.pid')
@@ -269,38 +270,51 @@ function runAppleScript(script) {
   })
 }
 
-async function startBackendElevatedMac(exe) {
+function buildMacBackendLifecycleCommand(exe, { start = false } = {}) {
   ensureBackendRuntimeDir()
   const pidFile = backendPidFile()
   const logFile = backendLogFile()
+  const backendName = path.basename(exe || 'locwarp-backend')
   const command = [
-    'mkdir -p', shellQuote(backendRuntimeDir()),
-    '&& if [ -f', shellQuote(pidFile), ']; then',
-    'PID=$(cat', shellQuote(pidFile), '2>/dev/null);',
-    'if [ -n "$PID" ]; then kill "$PID" 2>/dev/null || true; fi;',
-    'rm -f', shellQuote(pidFile), ';',
-    'fi',
-    '&& : >', shellQuote(logFile),
-    '&& cd', shellQuote(path.dirname(exe)),
-    '&&', shellQuote(exe), '</dev/null', '>', shellQuote(logFile), '2>&1', '&',
-    'echo $! >', shellQuote(pidFile),
-  ].join(' ')
+    'set -e',
+    'mkdir -p ' + shellQuote(backendRuntimeDir()),
+    'stop_pid() { pid="$1"; if [ -n "$pid" ]; then kill "$pid" 2>/dev/null || true; fi; }',
+    'kill_by_name() { for pid in $(pgrep -x ' + shellQuote(backendName) + ' 2>/dev/null || true); do stop_pid "$pid"; done; }',
+    'kill_by_port() { for pid in $(lsof -tiTCP:' + BACKEND_PORT + ' -sTCP:LISTEN 2>/dev/null || true); do stop_pid "$pid"; done; }',
+    'if [ -f ' + shellQuote(pidFile) + ' ]; then PID=$(cat ' + shellQuote(pidFile) + ' 2>/dev/null || true); if [ -n "$PID" ]; then stop_pid "$PID"; fi; rm -f ' + shellQuote(pidFile) + '; fi',
+    'kill_by_name',
+    'kill_by_port',
+    'for _ in 1 2 3 4 5 6; do',
+    '  if ! pgrep -x ' + shellQuote(backendName) + ' >/dev/null 2>&1 && ! lsof -tiTCP:' + BACKEND_PORT + ' -sTCP:LISTEN >/dev/null 2>&1; then break; fi',
+    '  sleep 0.5',
+    '  kill_by_name',
+    '  kill_by_port',
+    'done',
+  ]
+
+  if (start) {
+    command.push(
+      ': > ' + shellQuote(logFile),
+      'cd ' + shellQuote(path.dirname(exe)),
+      'nohup ' + shellQuote(exe) + ' </dev/null > ' + shellQuote(logFile) + ' 2>&1 &',
+      'echo $! > ' + shellQuote(pidFile),
+      'echo started pid $(cat ' + shellQuote(pidFile) + ')',
+    )
+  }
+
+  return command.join('; ')
+}
+
+async function startBackendElevatedMac(exe) {
+  const command = buildMacBackendLifecycleCommand(exe, { start: true })
   const script = `do shell script ${JSON.stringify(command)} with administrator privileges`
   await runAppleScript(script)
   tailBackendLog()
 }
 
-async function stopBackendElevatedMac() {
+async function stopBackendElevatedMac(exe) {
   stopBackendLogTail()
-  const pidFile = backendPidFile()
-  if (!fs.existsSync(pidFile)) return
-  const command = [
-    'if [ -f', shellQuote(pidFile), ']; then',
-    'PID=$(cat', shellQuote(pidFile), '2>/dev/null);',
-    'if [ -n "$PID" ]; then kill "$PID" 2>/dev/null || true; fi;',
-    'rm -f', shellQuote(pidFile), ';',
-    'fi'
-  ].join(' ')
+  const command = buildMacBackendLifecycleCommand(exe || resolveBackendExe() || 'locwarp-backend', { start: false })
   const script = `do shell script ${JSON.stringify(command)} with administrator privileges`
   try {
     await runAppleScript(script)
@@ -331,7 +345,7 @@ function resolveBackendExe() {
 
 async function isBackendReachable(timeoutMs = 1200) {
   return new Promise((resolve) => {
-    const req = http.get('http://127.0.0.1:8777/docs', (res) => {
+    const req = http.get(`http://127.0.0.1:${BACKEND_PORT}/docs`, (res) => {
       res.destroy()
       resolve(true)
     })
@@ -381,7 +395,7 @@ async function startBackend() {
 
 async function stopBackend() {
   if (process.platform === 'darwin') {
-    await stopBackendElevatedMac()
+    await stopBackendElevatedMac(resolveBackendExe() || 'locwarp-backend')
     return
   }
   if (!backendProc) return
@@ -389,11 +403,26 @@ async function stopBackend() {
   backendProc = null
 }
 
+ipcMain.handle('restart-backend', async () => {
+  const exe = resolveBackendExe()
+  if (!exe) throw new Error('backend executable not found')
+
+  if (process.platform === 'darwin') {
+    await startBackendElevatedMac(exe)
+  } else {
+    await stopBackend()
+    await startBackend()
+  }
+
+  await waitForBackend(30000)
+  return { ok: true }
+})
+
 function waitForBackend(timeoutMs = 30000) {
   const started = Date.now()
   return new Promise((resolve, reject) => {
     const tick = () => {
-      const req = http.get('http://127.0.0.1:8777/docs', (res) => {
+      const req = http.get(`http://127.0.0.1:${BACKEND_PORT}/docs`, (res) => {
         res.destroy()
         resolve()
       })

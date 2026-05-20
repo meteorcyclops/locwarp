@@ -16,6 +16,10 @@ export interface RenderModeInfo {
   isWin10: boolean
 }
 
+export interface RestartBackendResult {
+  ok: boolean
+}
+
 declare global {
   interface Window {
     electronAPI?: {
@@ -23,6 +27,7 @@ declare global {
       getRenderMode(): Promise<RenderModeInfo>
       setRenderMode(mode: RenderMode): Promise<{ ok: boolean }>
       relaunchApp(): Promise<void>
+      restartBackend(): Promise<RestartBackendResult>
       clipboard?: {
         readText(): Promise<string> | string
         writeText(text: string): Promise<void> | void
