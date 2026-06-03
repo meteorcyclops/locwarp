@@ -4,7 +4,6 @@ const path = require('path')
 const { spawn, execFile } = require('child_process')
 const http = require('http')
 const os = require('os')
-const fs = require('fs')
 
 // Render-mode preference (Issue #24). Win 10 stays on software rendering
 // by default — v0.2.121/125 hit a Chromium 124 GPU-sandbox crash on
