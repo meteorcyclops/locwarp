@@ -50,6 +50,14 @@ const SPEED_MAP: Record<MoveMode, number> = {
   driving: 60,
 }
 
+const DEFAULT_ROUTE_CATEGORY = {
+  id: 'default',
+  name: '預設',
+  color: '#6c8cff',
+  sort_order: 0,
+  created_at: '',
+}
+
 const App: React.FC = () => {
   const t = useT()
   const ws = useWebSocket()
@@ -67,8 +75,18 @@ const App: React.FC = () => {
   const refreshRouteCategories = useCallback(async () => {
     try {
       const cats = await api.listRouteCategories()
-      setRouteCategories(Array.isArray(cats) ? cats : [])
-    } catch { /* leave empty so RouteList still falls back to default */ }
+      if (Array.isArray(cats) && cats.length > 0) {
+        setRouteCategories(cats)
+      } else {
+        setRouteCategories([DEFAULT_ROUTE_CATEGORY])
+      }
+    } catch {
+      // Older backend builds can still serve /api/route/saved but not
+      // /api/route/categories yet. Keep the route list usable by
+      // synthesizing a default bucket client-side instead of rendering an
+      // empty categories array, which hides every saved route.
+      setRouteCategories([DEFAULT_ROUTE_CATEGORY])
+    }
   }, [])
   // Bumped every time an external trigger (currently the map topleft
   // library button) wants ControlPanel to open its library panel.
