@@ -301,7 +301,10 @@ function buildMacBackendLifecycleCommand(exe, { start = false } = {}) {
     )
   }
 
-  return command.join('; ')
+  // Join with newlines, not semicolons. Some fragments already contain
+  // shell block delimiters like `do` and background `&`; joining with `; `
+  // turns them into invalid tokens such as `do;` and `&;`.
+  return command.join('\n')
 }
 
 async function startBackendElevatedMac(exe) {
