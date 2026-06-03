@@ -13,6 +13,7 @@ from models.schemas import (
     JoystickStartRequest,
     GoldDittoCycleRequest,
     SimulationStatus,
+    SimulationState,
     Coordinate,
     CooldownSettings,
     CooldownStatus,
@@ -563,6 +564,26 @@ async def debug_info():
 
 @router.get("/status", response_model=SimulationStatus)
 async def get_status(udid: str | None = None):
+    from main import app_state
+
+    # Fast path for "no device connected" so polling /api/location/status
+    # does not block for ~10 seconds in _engine()'s lazy-discovery retry
+    # loop, which the frontend currently surfaces as a timeout.
+    if udid is None:
+        if app_state.simulation_engine is None and not app_state.device_manager._connections:
+            status = SimulationStatus(state=SimulationState.DISCONNECTED)
+            cooldown = _cooldown()
+            cs = cooldown.get_status()
+            status.cooldown_remaining = cs["remaining_seconds"]
+            return status
+    else:
+        if app_state.get_engine(udid) is None and udid not in app_state.device_manager._connections:
+            status = SimulationStatus(state=SimulationState.DISCONNECTED)
+            cooldown = _cooldown()
+            cs = cooldown.get_status()
+            status.cooldown_remaining = cs["remaining_seconds"]
+            return status
+
     engine = await _engine(udid)
     status = engine.get_status()
     cooldown = _cooldown()
