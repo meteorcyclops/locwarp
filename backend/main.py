@@ -315,11 +315,14 @@ async def _follow_primary_positions(follower_udid: str, primary_udid: str) -> No
 
 
 async def _usbmux_presence_watchdog():
-    """Poll usbmuxd every 2 s for both directions:
+    """Poll usbmuxd every 1 s for both directions:
 
     * **Disappearance** — a UDID present in DeviceManager._connections that
-      drops off the usbmux list for 2 consecutive polls is treated as USB
+      drops off the usbmux list for consecutive polls is treated as USB
       unplug: disconnect, clear simulation_engine, broadcast device_disconnected.
+      The threshold is dynamic: idle devices disconnect quickly, while an
+      actively moving device gets a longer grace window so short iOS 17+
+      tunnel renegotiations do not immediately kill the in-flight sim.
     * **Appearance** — a USB device showing up while we have no active
       connection triggers an auto-connect + engine rebuild, broadcasting
       device_reconnected when it succeeds. Failed attempts are throttled
@@ -334,9 +337,18 @@ async def _usbmux_presence_watchdog():
     import time
     from pymobiledevice3.usbmux import list_devices
     from api.websocket import broadcast
+    from models.schemas import SimulationState as _SS
 
     miss_counts: dict[str, int] = {}
-    miss_threshold = 3
+    idle_miss_threshold = 3
+    active_sim_miss_threshold = 8
+    reconnect_resume_snapshots: dict[str, dict] = {}
+    resumable_states = {
+        _SS.NAVIGATING,
+        _SS.LOOPING,
+        _SS.MULTI_STOP,
+        _SS.RANDOM_WALK,
+    }
     last_reconnect_attempt: dict[str, float] = {}
     # Per-udid consecutive failure count. Drives exponential backoff so a
     # device that consistently fails to connect (Trust pending, Windows
@@ -389,9 +401,16 @@ async def _usbmux_presence_watchdog():
                 if udid_lc in present_usb:
                     miss_counts.pop(udid_lc, None)
                 else:
+                    udid = connected_original[udid_lc]
+                    eng = app_state.simulation_engines.get(udid)
+                    miss_threshold = (
+                        active_sim_miss_threshold
+                        if eng is not None and eng.state in resumable_states
+                        else idle_miss_threshold
+                    )
                     miss_counts[udid_lc] = miss_counts.get(udid_lc, 0) + 1
                     if miss_counts[udid_lc] >= miss_threshold:
-                        lost_now.append(connected_original[udid_lc])
+                        lost_now.append(udid)
 
             if lost_now:
                 logger.warning("usbmux watchdog: device(s) gone → %s", lost_now)
@@ -416,7 +435,7 @@ async def _usbmux_presence_watchdog():
                             logger.exception("watchdog: capture_resumable_snapshot failed")
 
                 for udid in lost_now:
-                    miss_counts.pop(udid, None)
+                    miss_counts.pop(udid.lower(), None)
                     # Signal any simulation in flight (random-walk / loop /
                     # multi-stop) to exit its inner loop cleanly. Without
                     # this, the handler would keep trying to push positions
@@ -426,6 +445,24 @@ async def _usbmux_presence_watchdog():
                     old_eng = app_state.simulation_engines.get(udid)
                     if old_eng is not None:
                         try:
+                            # Single-device auto-resume: preserve a snapshot
+                            # for the SAME udid so when usbmux sees the phone
+                            # come back moments later we can rebuild the engine
+                            # and resume the exact sim instead of leaving the
+                            # user at a silent stop.
+                            if len(app_state.simulation_engines) == 1:
+                                reconnect_snapshot = old_eng.capture_resumable_snapshot()
+                                if reconnect_snapshot:
+                                    reconnect_resume_snapshots[udid] = reconnect_snapshot
+                                    logger.info(
+                                        "watchdog: stored reconnect snapshot for %s (kind=%s, segment=%d)",
+                                        udid,
+                                        reconnect_snapshot.get("kind"),
+                                        reconnect_snapshot.get("segment_index", 0),
+                                    )
+                        except Exception:
+                            logger.exception("watchdog: capture reconnect snapshot failed for %s", udid)
+                        try:
                             # Mark DISCONNECTED before cancelling the active
                             # task. Otherwise _run_handler's finally block sees
                             # a non-IDLE state and forces it to IDLE, emitting
@@ -434,7 +471,6 @@ async def _usbmux_presence_watchdog():
                             # event slips through the frontend filter (primary
                             # match) and wipes the global routePath / dest so
                             # the surviving device's polyline disappears.
-                            from models.schemas import SimulationState as _SS
                             old_eng.state = _SS.DISCONNECTED
                             try:
                                 await old_eng._emit("state_change", {"state": old_eng.state.value})
@@ -564,6 +600,20 @@ async def _usbmux_presence_watchdog():
                     logger.info("Auto-connect succeeded for %s", udid)
                     last_reconnect_attempt.pop(udid, None)
                     reconnect_failure_count.pop(udid, None)
+
+                    reconnect_snapshot = reconnect_resume_snapshots.pop(udid, None)
+                    if reconnect_snapshot is not None:
+                        try:
+                            new_eng = app_state.simulation_engines.get(udid)
+                            if new_eng is not None:
+                                logger.info(
+                                    "Auto-resuming %s from reconnect snapshot (kind=%s)",
+                                    udid,
+                                    reconnect_snapshot.get("kind"),
+                                )
+                                asyncio.create_task(new_eng.resume_from_snapshot(reconnect_snapshot))
+                        except Exception:
+                            logger.exception("Auto-resume after reconnect failed for %s", udid)
 
                     # Auto-sync the new device to the primary device: if the
                     # primary has a virtual position set, teleport the new

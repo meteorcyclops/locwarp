@@ -845,18 +845,28 @@ class DeviceManager:
         iPhone, or the WiFi tunnel cannot be restarted.
         """
         import time
-        deadline = time.monotonic() + timeout
+        started_at = time.monotonic()
+        deadline = started_at + timeout
         last_exc: Exception | None = None
+        usb_reconnect_attempted = False
 
         while True:
             async with self._lock:
                 conn = self._connections.get(udid)
 
             if conn is None:
-                raise DeviceLostError(
-                    f"Device {udid} no longer connected",
-                    reason=DeviceLostError.REASON_USB_GONE,
-                )
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise DeviceLostError(
+                        f"Device {udid} no longer connected",
+                        reason=DeviceLostError.REASON_USB_GONE,
+                    )
+                # During USB/WiFi auto-recovery there can be a brief window
+                # where the old connection has been torn down but the watchdog
+                # has not yet recreated the new one. Wait out that gap instead
+                # of surfacing DeviceLostError immediately.
+                await asyncio.sleep(min(0.5, remaining))
+                continue
 
             # WiFi: peek at the tunnel runner. If it has died, the watchdog
             # is in the middle of restarting it — wait until either a fresh
@@ -885,7 +895,23 @@ class DeviceManager:
                 await new_dvt.__aenter__()
             except Exception as exc:
                 last_exc = exc
+                elapsed = time.monotonic() - started_at
                 remaining = deadline - time.monotonic()
+                if (
+                    conn.connection_type == "USB"
+                    and not usb_reconnect_attempted
+                    and elapsed >= 1.5
+                ):
+                    usb_reconnect_attempted = True
+                    logger.warning(
+                        "DVT provider probe still failing for %s over USB (%s: %s); attempting full USB reconnect",
+                        udid, type(exc).__name__, exc,
+                    )
+                    try:
+                        await self.full_reconnect(udid)
+                    except Exception:
+                        logger.exception("In-place USB full_reconnect raised for %s", udid)
+                    continue
                 if remaining <= 0:
                     logger.warning(
                         "get_fresh_dvt_provider exhausted for %s: %s", udid, exc,
