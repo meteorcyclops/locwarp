@@ -342,6 +342,11 @@ async def _usbmux_presence_watchdog():
     miss_counts: dict[str, int] = {}
     idle_miss_threshold = 3
     active_sim_miss_threshold = 8
+    # Key by lowercase UDID because usbmux / pymobiledevice3 can report
+    # serial casing differently between list_devices() and connect().
+    # Using the raw string here makes a perfectly good reconnect snapshot
+    # look "missing" on auto-connect, which is exactly the silent failure
+    # mode we want to avoid.
     reconnect_resume_snapshots: dict[str, dict] = {}
     resumable_states = {
         _SS.NAVIGATING,
@@ -445,15 +450,20 @@ async def _usbmux_presence_watchdog():
                     old_eng = app_state.simulation_engines.get(udid)
                     if old_eng is not None:
                         try:
-                            # Single-device auto-resume: preserve a snapshot
-                            # for the SAME udid so when usbmux sees the phone
-                            # come back moments later we can rebuild the engine
-                            # and resume the exact sim instead of leaving the
-                            # user at a silent stop.
-                            if len(app_state.simulation_engines) == 1:
+                            # Same-device auto-resume: preserve a snapshot
+                            # only when this disconnect leaves no surviving
+                            # engine behind. If another device is still alive,
+                            # that peer should keep leading and the returning
+                            # device should re-attach via auto-sync instead of
+                            # reviving its own stale copy of the sim.
+                            surviving_engines = [
+                                other for other in app_state.simulation_engines.keys()
+                                if other not in lost_now and other != udid
+                            ]
+                            if not surviving_engines:
                                 reconnect_snapshot = old_eng.capture_resumable_snapshot()
                                 if reconnect_snapshot:
-                                    reconnect_resume_snapshots[udid] = reconnect_snapshot
+                                    reconnect_resume_snapshots[udid.lower()] = reconnect_snapshot
                                     logger.info(
                                         "watchdog: stored reconnect snapshot for %s (kind=%s, segment=%d)",
                                         udid,
@@ -601,17 +611,22 @@ async def _usbmux_presence_watchdog():
                     last_reconnect_attempt.pop(udid, None)
                     reconnect_failure_count.pop(udid, None)
 
-                    reconnect_snapshot = reconnect_resume_snapshots.pop(udid, None)
+                    reconnect_snapshot = reconnect_resume_snapshots.pop(udid.lower(), None)
                     if reconnect_snapshot is not None:
                         try:
                             new_eng = app_state.simulation_engines.get(udid)
-                            if new_eng is not None:
+                            if new_eng is not None and len(app_state.simulation_engines) == 1:
                                 logger.info(
                                     "Auto-resuming %s from reconnect snapshot (kind=%s)",
                                     udid,
                                     reconnect_snapshot.get("kind"),
                                 )
                                 asyncio.create_task(new_eng.resume_from_snapshot(reconnect_snapshot))
+                            elif new_eng is not None:
+                                logger.info(
+                                    "Skipping reconnect snapshot resume for %s because another engine is still active",
+                                    udid,
+                                )
                         except Exception:
                             logger.exception("Auto-resume after reconnect failed for %s", udid)
 
