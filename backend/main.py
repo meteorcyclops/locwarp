@@ -369,21 +369,28 @@ async def _usbmux_presence_watchdog():
         await asyncio.sleep(1.0)
         try:
             dm = app_state.device_manager
-            # Build two views: the ORIGINAL-case serials (needed for
-            # downstream look-ups into dm._connections /
-            # app_state.simulation_engines that use whatever case was
-            # originally stored) and a LOWERCASE set used only for the
-            # present_usb - connected set difference. Some pymobiledevice3
-            # versions return list_devices()'s serial in different casing
-            # from what connect() stores, which previously made every
-            # tick look like "new device detected" and triggered a
-            # (pre-idempotency-fix) engine recreation that wiped the
-            # user's teleported current_position.
-            connected_original: dict[str, str] = {}  # lowercase → original
+            # Build two views:
+            #
+            # * connected_usb_original: USB-tracked connections only. This
+            #   drives disappearance detection because only those should be
+            #   treated as "USB unplugged" when they vanish from usbmuxd.
+            # * connected_any: every active connection regardless of whether
+            #   it currently routes over USB or Network. This drives
+            #   appearance detection so a device already connected via WiFi
+            #   tunnel is NOT re-treated as a brand new USB device every
+            #   second just because the cable is still plugged in.
+            #
+            # Everything is keyed by lowercase UDID because some
+            # pymobiledevice3 versions report different serial casing
+            # between list_devices() and connect().
+            connected_usb_original: dict[str, str] = {}  # lowercase → original
+            connected_any: set[str] = set()
             for udid, conn in dm._connections.items():
+                udid_lc = udid.lower()
+                connected_any.add(udid_lc)
                 if getattr(conn, "connection_type", "USB") == "USB":
-                    connected_original[udid.lower()] = udid
-            connected = set(connected_original.keys())
+                    connected_usb_original[udid_lc] = udid
+            connected_usb = set(connected_usb_original.keys())
 
             try:
                 raw = await list_devices()
@@ -402,11 +409,11 @@ async def _usbmux_presence_watchdog():
             # _connections so whichever case was stored in those maps
             # is what we use for look-ups.
             lost_now: list[str] = []
-            for udid_lc in connected:
+            for udid_lc in connected_usb:
                 if udid_lc in present_usb:
                     miss_counts.pop(udid_lc, None)
                 else:
-                    udid = connected_original[udid_lc]
+                    udid = connected_usb_original[udid_lc]
                     eng = app_state.simulation_engines.get(udid)
                     miss_threshold = (
                         active_sim_miss_threshold
@@ -558,8 +565,8 @@ async def _usbmux_presence_watchdog():
             # device cap. The user environment is assumed to only ever have
             # their own iPhones plugged in.
             MAX_DEVICES = 3
-            new_udids_lc = present_usb - connected
-            if not new_udids_lc or len(connected) >= MAX_DEVICES:
+            new_udids_lc = present_usb - connected_any
+            if not new_udids_lc or len(dm._connections) >= MAX_DEVICES:
                 continue
             # Map back to the original-case serials from list_devices so
             # downstream dm.connect() sees the format pymobiledevice3
@@ -569,7 +576,7 @@ async def _usbmux_presence_watchdog():
             # Reset backoff for any UDID that just disappeared from usbmux —
             # the next time it shows up (re-plug) we want to try immediately,
             # not at the previous slot's accumulated cooldown.
-            stale = [u for u in reconnect_failure_count if u not in present_usb_original]
+            stale = [u for u in reconnect_failure_count if u.lower() not in present_usb_original]
             for u in stale:
                 reconnect_failure_count.pop(u, None)
                 last_reconnect_attempt.pop(u, None)
