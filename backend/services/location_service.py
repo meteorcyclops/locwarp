@@ -22,6 +22,11 @@ from pymobiledevice3.services.simulate_location import DtSimulateLocation
 logger = logging.getLogger(__name__)
 
 
+def _is_not_connected_runtime_error(exc: Exception) -> bool:
+    """Return True for pymobiledevice3's stale-channel RuntimeError."""
+    return isinstance(exc, RuntimeError) and "not connected" in str(exc)
+
+
 class DeviceLostError(RuntimeError):
     """Raised when a location service determines the underlying device
     connection is no longer recoverable (e.g. USB unplugged, tunnel dead).
@@ -203,6 +208,17 @@ class DvtLocationService(LocationService):
             await sim.set(lat, lng)
             self._active = True
             logger.info("DVT location set to (%.6f, %.6f) after reconnect", lat, lng)
+        except RuntimeError as exc:
+            if not _is_not_connected_runtime_error(exc):
+                logger.exception("Failed to set DVT simulated location")
+                raise
+            logger.warning("DVT service not connected (%s); reconnecting and retrying", exc)
+            self._location_sim = None
+            await self._reconnect()
+            sim = await self._ensure_instrument()
+            await sim.set(lat, lng)
+            self._active = True
+            logger.info("DVT location set to (%.6f, %.6f) after stale-service reconnect", lat, lng)
         except Exception:
             logger.exception("Failed to set DVT simulated location")
             raise
@@ -226,6 +242,17 @@ class DvtLocationService(LocationService):
             await sim.clear()
             self._active = False
             logger.info("DVT simulated location cleared after reconnect")
+        except RuntimeError as exc:
+            if not _is_not_connected_runtime_error(exc):
+                logger.exception("Failed to clear DVT simulated location")
+                raise
+            logger.warning("DVT service not connected during clear (%s); reconnecting", exc)
+            self._location_sim = None
+            await self._reconnect()
+            sim = await self._ensure_instrument()
+            await sim.clear()
+            self._active = False
+            logger.info("DVT simulated location cleared after stale-service reconnect")
         except Exception:
             logger.exception("Failed to clear DVT simulated location")
             raise
