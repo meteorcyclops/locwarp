@@ -510,7 +510,10 @@ const ControlPanel: React.FC<ControlPanelProps> = ({
               gap: 6,
             }}
           >
-            {Object.values(SimMode).map((mode) => (
+            {/* 多點導航 (MultiStop) is merged into 路線 (Loop): the only real
+                difference users saw was the lap count, which 路線 already
+                exposes (1 圈 = single pass). Hide it from the picker. */}
+            {Object.values(SimMode).filter((mode) => mode !== SimMode.MultiStop).map((mode) => (
               <button
                 key={mode}
                 className={`mode-btn${simMode === mode ? ' active' : ''}`}
@@ -866,10 +869,16 @@ const ControlPanel: React.FC<ControlPanelProps> = ({
               <span style={{ fontSize: 11, opacity: 0.7, whiteSpace: 'nowrap' }}>ms</span>
             </div>
             <button
-              className="action-btn primary"
               onClick={() => onGoldDittoStart?.()}
               disabled={goldDittoBusy}
-              style={{ width: '100%', padding: '8px 12px', fontSize: 13, fontWeight: 600 }}
+              style={{
+                width: '100%', padding: '10px 12px', fontSize: 14, fontWeight: 700,
+                borderRadius: 8, border: 'none', cursor: goldDittoBusy ? 'not-allowed' : 'pointer',
+                background: goldDittoBusy ? 'rgba(108,140,255,0.35)' : 'linear-gradient(135deg, #6c8cff 0%, #4f6fe8 100%)',
+                color: '#fff', letterSpacing: '0.03em',
+                boxShadow: goldDittoBusy ? 'none' : '0 4px 16px rgba(108,140,255,0.45)',
+                transition: 'all 0.15s', opacity: goldDittoBusy ? 0.6 : 1,
+              }}
             >
               {t('goldditto.start_button')}
             </button>
@@ -1095,7 +1104,6 @@ const ControlPanel: React.FC<ControlPanelProps> = ({
                 <circle cx="9" cy="6" r="1" /><circle cx="9" cy="12" r="1" /><circle cx="9" cy="18" r="1" />
                 <circle cx="15" cy="6" r="1" /><circle cx="15" cy="12" r="1" /><circle cx="15" cy="18" r="1" />
               </svg>
-              {t('panel.library_drag_hint')}
             </div>
             <div style={{ display: 'flex', alignItems: 'center', borderBottom: '1px solid #3a3a42' }}>
               <button

@@ -30,7 +30,6 @@ interface DeviceStatusProps {
   tunnelStatus?: TunnelStatus;
   tunnels?: TunnelInfo[];
   onWifiConnect?: (ip: string) => Promise<any>;
-  onRevealDeveloperMode?: (udid: string) => Promise<void>;
   pinnedUdids?: string[];
   onTogglePin?: (udid: string) => void;
 }
@@ -46,7 +45,6 @@ const DeviceStatus: React.FC<DeviceStatusProps> = ({
   tunnelStatus = { running: false },
   tunnels = [],
   onWifiConnect,
-  onRevealDeveloperMode,
   pinnedUdids = [],
   onTogglePin,
 }) => {
@@ -104,7 +102,6 @@ const DeviceStatus: React.FC<DeviceStatusProps> = ({
   const [showIpHelp, setShowIpHelp] = useState(false);
   const [discovering, setDiscovering] = useState(false);
   const [wifiExpanded, setWifiExpanded] = useState(false);
-  const [revealingDevMode, setRevealingDevMode] = useState(false);
   const [showWifiWarning, setShowWifiWarning] = useState(false);
   const [showRepairConfirm, setShowRepairConfirm] = useState(false);
   const [repairState, setRepairState] = useState<'idle' | 'running' | 'success' | 'failed'>('idle');
@@ -157,14 +154,23 @@ const DeviceStatus: React.FC<DeviceStatusProps> = ({
     setDiscoverResults([]);
     try {
       const res = await wifiTunnelDiscover();
-      const list = res?.devices || [];
+      const rawList = res?.devices || [];
+      // Deduplicate by ip:port — mDNS can return the same device on
+      // multiple interfaces (e.g. Ethernet + WiFi) with identical IPs.
+      const seen = new Set<string>();
+      const list = rawList.filter((d: any) => {
+        const key = `${d.ip}:${d.port}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
       if (list.length === 0) {
         setTunnelError(t('wifi.device_not_detected'));
       } else if (list.length === 1) {
         setTunnelIp(list[0].ip);
         setTunnelPort(String(list[0].port));
       } else {
-        setDiscoverResults(list.map((d) => ({ ip: d.ip, port: d.port, name: d.name || d.ip })));
+        setDiscoverResults(list.map((d: any) => ({ ip: d.ip, port: d.port, name: d.name || d.ip })));
       }
     } catch (err: any) {
       setTunnelError(err.message || t('wifi.detect_failed'));
@@ -180,151 +186,170 @@ const DeviceStatus: React.FC<DeviceStatusProps> = ({
 
   return (
     <div className={`device-status ${isConnected ? 'device-connected' : 'device-disconnected'}`}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
-        {/* Status indicator dot */}
+      {/* Device info card — no scan button inside */}
+      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, marginBottom: 6 }}>
         <div
           style={{
-            width: 10,
-            height: 10,
-            borderRadius: '50%',
+            width: 10, height: 10, borderRadius: '50%', flexShrink: 0, marginTop: 4,
             background: isConnected ? '#4caf50' : '#f44336',
-            flexShrink: 0,
             boxShadow: isConnected ? '0 0 6px #4caf50' : '0 0 6px #f44336',
           }}
         />
         <div style={{ flex: 1, minWidth: 0 }}>
-          {device ? (
-            <>
-              <div style={{ fontSize: 13, fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                {device.name}
-              </div>
-              <div style={{ fontSize: 11, opacity: 0.6, display: 'flex', alignItems: 'center', gap: 4 }}>
-                iOS {device.iosVersion}
-                {device.connectionType && (
-                  <span
-                    style={{
-                      display: 'inline-flex',
-                      alignItems: 'center',
-                      gap: 3,
-                      padding: '1px 5px',
-                      borderRadius: 3,
-                      fontSize: 10,
-                      background: device.connectionType === 'Network' ? 'rgba(76, 175, 80, 0.15)' : 'rgba(108, 140, 255, 0.15)',
-                      color: device.connectionType === 'Network' ? '#4caf50' : '#6c8cff',
-                    }}
-                  >
-                    {device.connectionType === 'Network' ? (
-                      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                        <path d="M5 12.55a11 11 0 0114 0" />
-                        <path d="M8.53 16.11a6 6 0 016.95 0" />
-                        <circle cx="12" cy="20" r="1" fill="currentColor" />
-                      </svg>
-                    ) : (
-                      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                        <rect x="9" y="2" width="6" height="20" rx="1" />
-                        <line x1="9" y1="18" x2="15" y2="18" />
-                      </svg>
-                    )}
-                    {device.connectionType === 'Network' ? 'WiFi' : 'USB'}
+          {device ? (() => {
+            const isWifi = device.connectionType === 'Network';
+            const activeTunnel = isWifi ? tunnels.find((tn) => tn.udid === device.id) : null;
+            const pinned = activeTunnel ? pinnedUdids.includes(device.id) : false;
+            return (
+              <>
+                <div style={{ fontSize: 13, fontWeight: 600, overflowWrap: 'anywhere', lineHeight: 1.35 }}>
+                  {device.name}
+                </div>
+                <div style={{ fontSize: 11, opacity: 0.65, display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 4, marginTop: 3 }}>
+                  <span>iOS {device.iosVersion}</span>
+                  <span style={{
+                    padding: '1px 6px', borderRadius: 3, fontSize: 11,
+                    background: isWifi ? 'rgba(76, 175, 80, 0.15)' : 'rgba(108, 140, 255, 0.15)',
+                    color: isWifi ? '#4caf50' : '#6c8cff',
+                  }}>
+                    {isWifi ? 'WiFi' : 'USB'}
                   </span>
+                  {activeTunnel && (
+                    <span style={{ fontFamily: 'monospace', fontSize: 10, opacity: 0.75 }}>
+                      {activeTunnel.rsd_address}:{activeTunnel.rsd_port}
+                    </span>
+                  )}
+                </div>
+                {activeTunnel && (
+                  <div style={{ display: 'flex', gap: 4, marginTop: 5 }}>
+                    {onTogglePin && (
+                      <button
+                        onClick={() => onTogglePin(device.id)}
+                        title={pinned ? t('wifi.pin_on_tooltip') : t('wifi.pin_off_tooltip')}
+                        style={{
+                          fontSize: 11, padding: '3px 10px', borderRadius: 4, cursor: 'pointer', whiteSpace: 'nowrap',
+                          border: pinned ? '1px solid rgba(108, 140, 255, 0.6)' : '1px solid rgba(255,255,255,0.18)',
+                          background: pinned ? 'rgba(108, 140, 255, 0.18)' : 'transparent',
+                          color: pinned ? '#9ac0ff' : 'var(--text-muted)',
+                        }}
+                      >
+                        {pinned ? t('wifi.pin_on') : t('wifi.pin_off')}
+                      </button>
+                    )}
+                    <button
+                      onClick={async () => { if (onStopTunnel) await onStopTunnel(device.id); }}
+                      style={{
+                        fontSize: 11, padding: '3px 10px', borderRadius: 4, cursor: 'pointer',
+                        border: '1px solid rgba(244, 67, 54, 0.45)',
+                        background: 'rgba(244, 67, 54, 0.08)', color: '#f44336',
+                      }}
+                    >
+                      {t('wifi.tunnel_stop')}
+                    </button>
+                  </div>
                 )}
-              </div>
-            </>
-          ) : (
-            <div style={{ fontSize: 13, opacity: 0.6 }}>No device</div>
+              </>
+            );
+          })() : (
+            <div style={{ fontSize: 13, opacity: 0.55 }}>No device</div>
           )}
         </div>
-        <button
-          className="action-btn"
-          onClick={handleScan}
-          disabled={scanning}
-          style={{ padding: '4px 10px', fontSize: 12, display: 'inline-flex', alignItems: 'center', gap: 4, minWidth: 70, justifyContent: 'center' }}
-          title={t('device.scan_tooltip')}
-        >
-          {scanning ? (
-            <>
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ animation: 'spin 1s linear infinite' }}>
-                <circle cx="12" cy="12" r="10" strokeDasharray="32" strokeDashoffset="16" />
-              </svg>
-              {t('device.scan_scanning')}
-            </>
-          ) : scanResult != null && scanResult > 0 ? (
-            <>
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#4caf50" strokeWidth="3">
-                <polyline points="20 6 9 17 4 12" />
-              </svg>
-              <span style={{ color: '#4caf50' }}>{t('device.scan_found', { n: scanResult })}</span>
-            </>
-          ) : scanResult === 0 ? (
-            <>
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#f44336" strokeWidth="2.5">
-                <circle cx="12" cy="12" r="10" />
-                <line x1="15" y1="9" x2="9" y2="15" />
-                <line x1="9" y1="9" x2="15" y2="15" />
-              </svg>
-              <span style={{ color: '#f44336' }}>{t('device.scan_none')}</span>
-            </>
-          ) : (
-            <>
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <path d="M1 1l4 4" />
-                <path d="M5 12a7 7 0 0114 0" />
-                <path d="M8.5 8.5a4 4 0 017 0" />
-                <circle cx="12" cy="12" r="1" fill="currentColor" />
-              </svg>
-              USB
-            </>
-          )}
-        </button>
       </div>
 
-      {/* Reveal Developer Mode button — only show when device is connected,
-          iOS >= 16, and dev mode is explicitly reported as OFF. Clicking it
-          writes the AMFIShowOverridePath marker via AMFI so the "Developer
-          Mode" option appears in Settings → Privacy & Security. */}
-      {device && isConnected && device.developerModeEnabled === false && (() => {
-        let major = 0
-        try { major = parseInt((device.iosVersion || '0').split('.')[0], 10) } catch {}
-        if (major < 16) return null
-        return (
-          <button
-            className="dev-mode-card"
-            onClick={async () => {
-              if (!onRevealDeveloperMode) return
-              setRevealingDevMode(true)
-              try {
-                await onRevealDeveloperMode(device.id)
-              } finally {
-                setRevealingDevMode(false)
-              }
-            }}
-            disabled={revealingDevMode}
-            style={{ marginBottom: 8 }}
-            title={t('dev_mode.reveal_tooltip')}
-          >
-            <span className="ic-wrap">
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <rect x="5" y="2" width="14" height="20" rx="2" />
-                <line x1="12" y1="18" x2="12" y2="18" />
-              </svg>
-            </span>
-            <span className="text">
-              <span className="title">
-                {revealingDevMode ? t('dev_mode.reveal_working') : t('dev_mode.reveal_button')}
-              </span>
-              <span className="sub">{t('dev_mode.reveal_card_sub')}</span>
-            </span>
-            {!revealingDevMode && (
-              <svg className="arrow" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                <polyline points="9 18 15 12 9 6" />
-              </svg>
-            )}
-          </button>
-        )
-      })()}
+      {/* USB scan button — standalone row below device info */}
+      <button
+        className="action-btn"
+        onClick={handleScan}
+        disabled={scanning}
+        style={{ width: '100%', padding: '6px 10px', fontSize: 12, marginBottom: 8, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5 }}
+        title={t('device.scan_tooltip')}
+      >
+        {scanning ? (
+          <>
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ animation: 'spin 1s linear infinite' }}>
+              <circle cx="12" cy="12" r="10" strokeDasharray="32" strokeDashoffset="16" />
+            </svg>
+            {t('device.scan_scanning')}
+          </>
+        ) : scanResult != null && scanResult > 0 ? (
+          <>
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#4caf50" strokeWidth="3">
+              <polyline points="20 6 9 17 4 12" />
+            </svg>
+            <span style={{ color: '#4caf50' }}>{t('device.scan_found', { n: scanResult })}</span>
+          </>
+        ) : scanResult === 0 ? (
+          <>
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#f44336" strokeWidth="2.5">
+              <circle cx="12" cy="12" r="10" /><line x1="15" y1="9" x2="9" y2="15" /><line x1="9" y1="9" x2="15" y2="15" />
+            </svg>
+            <span style={{ color: '#f44336' }}>{t('device.scan_none')}</span>
+          </>
+        ) : (
+          t('device.scan_tooltip')
+        )}
+      </button>
 
-      {/* Device dropdown */}
-      {devices.length >= 1 && (
+      {/* WiFi tunnel cards for additional devices not shown in the top row */}
+      {tunnels.filter((tn) => tn.udid !== device?.id).length > 0 && (
+        <div style={{ marginBottom: 8 }}>
+          {tunnels.filter((tn) => tn.udid !== device?.id).map((tn) => {
+            const dev = devices.find((d) => d.id === tn.udid);
+            const dispName = dev?.name || savedNameByUdid[tn.udid] || tn.udid.slice(0, 12);
+            const pinned = pinnedUdids.includes(tn.udid);
+            return (
+              <div key={tn.udid} style={{
+                display: 'flex', alignItems: 'flex-start', gap: 6,
+                marginBottom: 4, padding: '5px 8px',
+                background: 'rgba(76, 175, 80, 0.08)',
+                border: '1px solid rgba(76, 175, 80, 0.25)',
+                borderRadius: 3,
+              }}>
+                <div style={{ width: 8, height: 8, borderRadius: '50%', background: '#4caf50', flexShrink: 0, boxShadow: '0 0 4px #4caf50', marginTop: 3 }} />
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 13, fontWeight: 600, overflowWrap: 'anywhere', lineHeight: 1.35 }}>
+                    {dispName}
+                  </div>
+                  <div style={{ fontSize: 11, opacity: 0.65, display: 'flex', gap: 4, alignItems: 'center', flexWrap: 'wrap', marginTop: 3 }}>
+                    {dev?.iosVersion && <span>iOS {dev.iosVersion}</span>}
+                    <span style={{ padding: '1px 6px', borderRadius: 3, background: 'rgba(76, 175, 80, 0.15)', color: '#4caf50', fontSize: 11 }}>WiFi</span>
+                    <span style={{ fontFamily: 'monospace', fontSize: 10, opacity: 0.75 }}>{tn.rsd_address}:{tn.rsd_port}</span>
+                  </div>
+                  <div style={{ display: 'flex', gap: 4, marginTop: 5 }}>
+                    {onTogglePin && (
+                      <button
+                        onClick={() => onTogglePin(tn.udid)}
+                        title={pinned ? t('wifi.pin_on_tooltip') : t('wifi.pin_off_tooltip')}
+                        style={{
+                          fontSize: 11, padding: '3px 10px', borderRadius: 4, cursor: 'pointer', whiteSpace: 'nowrap',
+                          border: pinned ? '1px solid rgba(108, 140, 255, 0.6)' : '1px solid rgba(255,255,255,0.18)',
+                          background: pinned ? 'rgba(108, 140, 255, 0.18)' : 'transparent',
+                          color: pinned ? '#9ac0ff' : 'var(--text-muted)',
+                        }}
+                      >
+                        {pinned ? t('wifi.pin_on') : t('wifi.pin_off')}
+                      </button>
+                    )}
+                    <button
+                      onClick={async () => { if (onStopTunnel) await onStopTunnel(tn.udid); }}
+                      style={{
+                        fontSize: 11, padding: '3px 10px', borderRadius: 4, cursor: 'pointer',
+                        border: '1px solid rgba(244, 67, 54, 0.45)',
+                        background: 'rgba(244, 67, 54, 0.08)', color: '#f44336',
+                      }}
+                    >
+                      {t('wifi.tunnel_stop')}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* Device dropdown — only shown when 2+ USB devices found; single device auto-connects */}
+      {devices.length > 1 && (
         <div style={{ position: 'relative', marginBottom: 6 }}>
           <button
             className="action-btn"
@@ -336,7 +361,7 @@ const DeviceStatus: React.FC<DeviceStatusProps> = ({
                 <rect x="5" y="2" width="14" height="20" rx="2" />
                 <line x1="12" y1="18" x2="12" y2="18" />
               </svg>
-              {devices.length} devices found
+              {t('device.scan_found', { n: devices.length })}
             </span>
             <svg
               width="10"
@@ -460,13 +485,7 @@ const DeviceStatus: React.FC<DeviceStatusProps> = ({
             }}
           >
             <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83" />
-              </svg>
-              <span style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', lineHeight: 1.2 }}>
-                <span>{t('wifi.section_title')}</span>
-                <span style={{ fontSize: 10, opacity: 0.6 }}>{t('wifi.section_hint')}</span>
-              </span>
+              <span>{t('wifi.section_title')}</span>
               <span
                 role="button"
                 aria-label={t('wifi.warning_label')}
@@ -480,16 +499,6 @@ const DeviceStatus: React.FC<DeviceStatusProps> = ({
                   border: '1px solid rgba(255, 193, 7, 0.4)',
                 }}
               >!</span>
-              {tunnels.length > 0 && (
-                <span style={{
-                  fontSize: 10, padding: '1px 6px', borderRadius: 3,
-                  background: 'rgba(76, 175, 80, 0.15)', color: '#4caf50',
-                  display: 'inline-flex', alignItems: 'center', gap: 3,
-                }}>
-                  <div style={{ width: 6, height: 6, borderRadius: '50%', background: '#4caf50' }} />
-                  {t('wifi.tunnel_active_count', { n: tunnels.length, max: MAX_TUNNEL_DEVICES })}
-                </span>
-              )}
             </span>
             <svg
               width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
@@ -501,35 +510,21 @@ const DeviceStatus: React.FC<DeviceStatusProps> = ({
 
           {wifiExpanded && (
             <div style={{ marginTop: 8 }}>
-              <button
-                onClick={() => { setRepairState('idle'); setRepairMessage(''); setShowRepairConfirm(true); }}
-                title={t('wifi.repair_tooltip')}
-                style={{
-                  width: '100%', padding: '5px 8px', fontSize: 11, marginBottom: 8,
-                  background: 'rgba(255, 193, 7, 0.08)',
-                  border: '1px solid rgba(255, 193, 7, 0.35)',
-                  borderRadius: 4, color: '#ffc107', cursor: 'pointer',
-                  display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
-                }}
-              >
-                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                  <path d="M21 12a9 9 0 11-6.219-8.56" />
-                  <polyline points="21 3 21 9 15 9" />
-                </svg>
-                {t('wifi.repair_button')}
-              </button>
-
-              {/* Help + Discover buttons row */}
-              <div style={{ display: 'flex', gap: 6, marginBottom: 6 }}>
+              {/* Help + Discover + Repair buttons row */}
+              <div style={{ display: 'flex', gap: 5, marginBottom: 8 }}>
                 <button
                   onClick={() => setShowIpHelp(!showIpHelp)}
                   style={{
-                    flex: 1, fontSize: 10, padding: '3px 6px', borderRadius: 3,
-                    border: '1px solid rgba(255,255,255,0.15)',
-                    background: 'rgba(255,255,255,0.04)', color: 'rgba(255,255,255,0.7)',
-                    cursor: 'pointer',
+                    flex: 1, fontSize: 11, padding: '5px 0', borderRadius: 5,
+                    border: `1px solid ${showIpHelp ? 'rgba(108,140,255,0.5)' : 'rgba(255,255,255,0.18)'}`,
+                    background: showIpHelp ? 'rgba(108,140,255,0.12)' : 'rgba(255,255,255,0.05)',
+                    color: showIpHelp ? '#9ac0ff' : 'rgba(255,255,255,0.75)',
+                    cursor: 'pointer', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 4,
                   }}
                 >
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <circle cx="12" cy="12" r="10" /><line x1="12" y1="8" x2="12" y2="12" /><line x1="12" y1="16" x2="12.01" y2="16" />
+                  </svg>
                   {t('wifi.help_ip')}
                 </button>
                 <button
@@ -537,18 +532,34 @@ const DeviceStatus: React.FC<DeviceStatusProps> = ({
                   disabled={discovering || tunnels.length >= MAX_TUNNEL_DEVICES}
                   title={t('wifi.detect_tooltip')}
                   style={{
-                    flex: 1, fontSize: 10, padding: '3px 6px', borderRadius: 3,
+                    flex: 1, fontSize: 11, padding: '5px 0', borderRadius: 5,
                     border: '1px solid rgba(108, 140, 255, 0.5)',
                     background: 'rgba(108, 140, 255, 0.12)',
                     color: '#6c8cff', cursor: discovering ? 'wait' : 'pointer',
-                    display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 3,
+                    display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 4,
+                    opacity: (discovering || tunnels.length >= MAX_TUNNEL_DEVICES) ? 0.5 : 1,
                   }}
                 >
-                  <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" style={discovering ? { animation: 'spin 1s linear infinite' } : undefined}>
-                    <circle cx="11" cy="11" r="7" />
-                    <line x1="21" y1="21" x2="16.65" y2="16.65" />
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" style={discovering ? { animation: 'spin 1s linear infinite' } : undefined}>
+                    <circle cx="11" cy="11" r="7" /><line x1="21" y1="21" x2="16.65" y2="16.65" />
                   </svg>
                   {discovering ? t('wifi.detect_scanning') : t('wifi.detect')}
+                </button>
+                <button
+                  onClick={() => { setRepairState('idle'); setRepairMessage(''); setShowRepairConfirm(true); }}
+                  title={t('wifi.repair_tooltip')}
+                  style={{
+                    flex: 1, fontSize: 11, padding: '5px 0', borderRadius: 5,
+                    background: 'rgba(255, 193, 7, 0.08)',
+                    border: '1px solid rgba(255, 193, 7, 0.35)',
+                    color: '#ffc107', cursor: 'pointer',
+                    display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 4,
+                  }}
+                >
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <path d="M21 12a9 9 0 11-6.219-8.56" /><polyline points="21 3 21 9 15 9" />
+                  </svg>
+                  {t('wifi.repair_button')}
                 </button>
               </div>
 
@@ -607,112 +618,67 @@ const DeviceStatus: React.FC<DeviceStatusProps> = ({
                 </div>
               )}
 
-              {/* Auto-connect on launch toggle — persisted in localStorage,
-                  read by App.tsx after WS handshake. Skipped if any device
-                  is already connected at startup, so it never fights with
-                  a USB-attached iPhone. */}
+              {/* Auto-connect on launch toggle */}
               <label
                 style={{
-                  display: 'flex', alignItems: 'center', gap: 6,
-                  fontSize: 11, padding: '4px 6px', marginBottom: 8,
+                  display: 'flex', alignItems: 'center', gap: 8,
+                  fontSize: 11, padding: '5px 8px', marginBottom: 6,
                   background: 'rgba(108, 140, 255, 0.06)',
                   border: '1px solid rgba(108, 140, 255, 0.2)',
-                  borderRadius: 3, cursor: 'pointer',
+                  borderRadius: 4, cursor: 'pointer',
                 }}
                 title={t('wifi.autoconnect_tooltip')}
               >
-                <input
-                  type="checkbox"
-                  checked={autoConnectEnabled}
-                  onChange={(e) => handleAutoConnectToggle(e.target.checked)}
-                  style={{ margin: 0 }}
-                />
+                <input type="checkbox" checked={autoConnectEnabled} onChange={(e) => handleAutoConnectToggle(e.target.checked)} style={{ position: 'absolute', opacity: 0, width: 0, height: 0 }} />
+                <span style={{
+                  position: 'relative', display: 'inline-flex', alignItems: 'center',
+                  width: 28, height: 15, borderRadius: 8, flexShrink: 0,
+                  background: autoConnectEnabled ? '#6c8cff' : 'rgba(255,255,255,0.18)',
+                  transition: 'background 0.2s',
+                }}>
+                  <span style={{
+                    position: 'absolute', left: autoConnectEnabled ? 14 : 1,
+                    top: '50%', transform: 'translateY(-50%)',
+                    width: 13, height: 13, borderRadius: '50%',
+                    background: '#fff', transition: 'left 0.18s',
+                    boxShadow: '0 1px 3px rgba(0,0,0,0.35)',
+                  }} />
+                </span>
                 <span style={{ flex: 1 }}>{t('wifi.autoconnect_label')}</span>
               </label>
 
-              {/* Keep-alive toggle — backend periodically re-pushes the
-                  current simulated location to idle WiFi tunnels so iOS
-                  doesn't drop the RSD socket when the phone screen turns
-                  off (issue #33). Experimental; default ON. */}
+              {/* Keep-alive toggle */}
               <label
                 style={{
-                  display: 'flex', alignItems: 'center', gap: 6,
-                  fontSize: 11, padding: '4px 6px', marginBottom: 8,
+                  display: 'flex', alignItems: 'center', gap: 8,
+                  fontSize: 11, padding: '5px 8px', marginBottom: 8,
                   background: 'rgba(108, 140, 255, 0.06)',
                   border: '1px solid rgba(108, 140, 255, 0.2)',
-                  borderRadius: 3, cursor: 'pointer',
+                  borderRadius: 4, cursor: 'pointer',
                 }}
                 title={t('wifi.keepalive_tooltip')}
               >
-                <input
-                  type="checkbox"
-                  checked={keepaliveEnabled}
-                  onChange={(e) => handleKeepaliveToggle(e.target.checked)}
-                  style={{ margin: 0 }}
-                />
+                <input type="checkbox" checked={keepaliveEnabled} onChange={(e) => handleKeepaliveToggle(e.target.checked)} style={{ position: 'absolute', opacity: 0, width: 0, height: 0 }} />
+                <span style={{
+                  position: 'relative', display: 'inline-flex', alignItems: 'center',
+                  width: 28, height: 15, borderRadius: 8, flexShrink: 0,
+                  background: keepaliveEnabled ? '#6c8cff' : 'rgba(255,255,255,0.18)',
+                  transition: 'background 0.2s',
+                }}>
+                  <span style={{
+                    position: 'absolute', left: keepaliveEnabled ? 14 : 1,
+                    top: '50%', transform: 'translateY(-50%)',
+                    width: 13, height: 13, borderRadius: '50%',
+                    background: '#fff', transition: 'left 0.18s',
+                    boxShadow: '0 1px 3px rgba(0,0,0,0.35)',
+                  }} />
+                </span>
                 <span style={{ flex: 1 }}>{t('wifi.keepalive_label')}</span>
               </label>
 
-              {/* iOS 17+ WiFi Tunnel (RSD) — list of active tunnels + add form */}
+              {/* iOS 17+ WiFi Tunnel (RSD) — add form */}
               {onStartWifiTunnel && (
                 <>
-                  {tunnels.length > 0 && (
-                    <div style={{ marginBottom: 8 }}>
-                      {tunnels.map((tn) => {
-                        const dev = devices.find((d) => d.id === tn.udid);
-                        const dispName = dev?.name || savedNameByUdid[tn.udid] || tn.udid.slice(0, 12);
-                        const pinned = pinnedUdids.includes(tn.udid);
-                        return (
-                          <div key={tn.udid} style={{
-                            fontSize: 11, padding: '6px 8px', marginBottom: 4,
-                            background: 'rgba(76, 175, 80, 0.08)',
-                            border: '1px solid rgba(76, 175, 80, 0.25)',
-                            borderRadius: 3,
-                            display: 'flex', alignItems: 'center', gap: 6,
-                          }}>
-                            <div style={{ flex: 1, minWidth: 0 }}>
-                              <div style={{ fontWeight: 600, whiteSpace: 'normal', overflowWrap: 'anywhere' }}>
-                                {dispName}
-                              </div>
-                              <div style={{ fontSize: 10, opacity: 0.6 }}>
-                                {t('wifi.tunnel_local_endpoint')} {tn.rsd_address}:{tn.rsd_port}
-                              </div>
-                            </div>
-                            {onTogglePin && (
-                              <button
-                                onClick={() => onTogglePin(tn.udid)}
-                                title={pinned ? t('wifi.pin_on_tooltip') : t('wifi.pin_off_tooltip')}
-                                style={{
-                                  fontSize: 10, padding: '3px 8px', borderRadius: 3,
-                                  border: pinned ? '1px solid rgba(108, 140, 255, 0.6)' : '1px solid rgba(255,255,255,0.18)',
-                                  background: pinned ? 'rgba(108, 140, 255, 0.18)' : 'transparent',
-                                  color: pinned ? '#9ac0ff' : 'var(--text-muted)',
-                                  cursor: 'pointer', whiteSpace: 'nowrap',
-                                }}
-                              >
-                                {pinned ? t('wifi.pin_on') : t('wifi.pin_off')}
-                              </button>
-                            )}
-                            <button
-                              onClick={async () => { if (onStopTunnel) await onStopTunnel(tn.udid); }}
-                              style={{
-                                fontSize: 10, padding: '3px 8px', borderRadius: 3,
-                                border: '1px solid rgba(244, 67, 54, 0.45)',
-                                background: 'rgba(244, 67, 54, 0.08)', color: '#f44336',
-                                cursor: 'pointer',
-                              }}
-                            >
-                              {t('wifi.tunnel_stop')}
-                            </button>
-                          </div>
-                        );
-                      })}
-                      <div style={{ fontSize: 10, opacity: 0.55, marginTop: 4 }}>
-                        {t('wifi.tunnel_usb_can_disconnect')}
-                      </div>
-                    </div>
-                  )}
-
                   {tunnels.length >= MAX_TUNNEL_DEVICES ? (
                     <div style={{
                       fontSize: 11, padding: '6px 8px', textAlign: 'center',
@@ -724,11 +690,6 @@ const DeviceStatus: React.FC<DeviceStatusProps> = ({
                     </div>
                   ) : (
                     <div>
-                      {tunnels.length > 0 && (
-                        <div style={{ fontSize: 10, opacity: 0.55, marginBottom: 4, fontWeight: 600 }}>
-                          {t('wifi.tunnel_add_another')}
-                        </div>
-                      )}
                       <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, marginBottom: 4, position: 'relative' }}>
                         <span style={{ opacity: 0.7, width: 36 }}>IP</span>
                         <input
@@ -924,7 +885,14 @@ const DeviceStatus: React.FC<DeviceStatusProps> = ({
                           }
                         }}
                         disabled={tunnelConnecting || portScanning}
-                        style={{ width: '100%', fontSize: 12 }}
+                        style={{
+                          width: '100%', fontSize: 13, fontWeight: 600, padding: '9px 12px',
+                          borderRadius: 7, border: 'none',
+                          background: (tunnelConnecting || portScanning) ? 'rgba(108,140,255,0.45)' : 'linear-gradient(135deg, #6c8cff 0%, #4f6fe8 100%)',
+                          color: '#fff', cursor: (tunnelConnecting || portScanning) ? 'wait' : 'pointer',
+                          boxShadow: (tunnelConnecting || portScanning) ? 'none' : '0 4px 14px rgba(108,140,255,0.45)',
+                          letterSpacing: '0.02em', transition: 'all 0.15s',
+                        }}
                       >
                         {(tunnelConnecting || portScanning) ? (
                           <span style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}>
