@@ -501,7 +501,7 @@ async def _usbmux_presence_watchdog():
                         except Exception:
                             logger.debug("watchdog: failed to stop old engine %s", udid, exc_info=True)
                     try:
-                        await dm.disconnect(udid)
+                        await dm.disconnect(udid, clear_location=False)
                     except Exception:
                         logger.exception("watchdog: disconnect failed for %s", udid)
                     # Only remove the lost device's engine. The legacy setter

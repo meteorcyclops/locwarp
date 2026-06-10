@@ -31,6 +31,31 @@ async def wifi_scan():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.post("/{udid}/ddi/mount")
+async def mount_personalized_ddi(udid: str):
+    from core.device_manager import DDIMountError
+
+    dm = _dm()
+    try:
+        result = await dm.mount_personalized_ddi(udid)
+        return {
+            "status": "mounted",
+            **result,
+        }
+    except DDIMountError as e:
+        status = 404 if e.code == "device_not_connected" else 400
+        raise HTTPException(
+            status_code=status,
+            detail={
+                "code": e.code,
+                "message": str(e),
+                "udid": udid,
+            },
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 class WifiTunnelConnectRequest(BaseModel):
     rsd_address: str
     rsd_port: int
@@ -537,7 +562,7 @@ async def _cleanup_wifi_connection_for(udid: str, *, caller: str) -> bool:
             )
 
     try:
-        await dm.disconnect(udid)
+        await dm.disconnect(udid, clear_location=False)
         _tunnel_logger.info("[%s] Disconnected WiFi device %s", caller, udid)
     except (OSError, RuntimeError):
         _tunnel_logger.exception("[%s] Failed to disconnect %s", caller, udid)

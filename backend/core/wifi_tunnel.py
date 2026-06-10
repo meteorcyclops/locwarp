@@ -33,6 +33,23 @@ class TunnelRunner:
     def is_running(self) -> bool:
         return self.task is not None and not self.task.done()
 
+    @staticmethod
+    def _consume_task_result(task: asyncio.Task) -> None:
+        """Mark background task exceptions as retrieved.
+
+        Tunnel start / restart timeouts can race cancellation, and the task
+        may finish with an exception after the caller has already moved on.
+        Without consuming the terminal result, asyncio emits noisy
+        "Task exception was never retrieved" tracebacks that obscure the real
+        tunnel-reset timeline in backend.log.
+        """
+        try:
+            task.exception()
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            pass
+
     async def _run(self, udid: str, ip: str, port: int) -> None:
         from pymobiledevice3.remote.tunnel_service import (
             create_core_device_tunnel_service_using_remotepairing,
@@ -108,6 +125,7 @@ class TunnelRunner:
         self.target_ip = ip
         self.target_port = port
         self.task = asyncio.create_task(self._run(udid, ip, port))
+        self.task.add_done_callback(self._consume_task_result)
         try:
             await asyncio.wait_for(self._ready.wait(), timeout=timeout)
         except asyncio.TimeoutError:

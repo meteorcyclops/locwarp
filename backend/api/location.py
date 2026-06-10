@@ -81,7 +81,7 @@ async def _engine(udid: str | None = None):
     _log.info("attempt 2 (hard reset) for %s", target_udid)
     try:
         try:
-            await dm.disconnect(target_udid)
+            await dm.disconnect(target_udid, clear_location=False)
         except Exception:
             _log.warning("disconnect during hard reset failed; proceeding", exc_info=True)
         await dm.connect(target_udid)
@@ -211,7 +211,7 @@ async def _handle_device_lost(exc: Exception, udid: str | None = None) -> "HTTPE
             except Exception:
                 _log.debug("device_lost: failed to stop old engine %s", u, exc_info=True)
         try:
-            await dm.disconnect(u)
+            await dm.disconnect(u, clear_location=False)
             _log.info("device_lost cleanup: disconnected %s", u)
         except Exception:
             _log.exception("device_lost cleanup: disconnect failed for %s", u)

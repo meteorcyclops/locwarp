@@ -55,6 +55,14 @@ class UnsupportedIosVersionError(RuntimeError):
         self.version = version
         super().__init__(f"iOS {version} is not supported (requires {self.MIN_VERSION}+)")
 
+
+class DDIMountError(RuntimeError):
+    """Structured error for personalized DDI mount / repair failures."""
+
+    def __init__(self, code: str, message: str) -> None:
+        self.code = code
+        super().__init__(message)
+
 logger = logging.getLogger(__name__)
 
 
@@ -352,8 +360,20 @@ class DeviceManager:
     # Disconnection
     # ------------------------------------------------------------------
 
-    async def disconnect(self, udid: str) -> None:
-        """Tear down the connection and clean up resources for *udid*."""
+    async def disconnect(self, udid: str, *, clear_location: bool = True) -> None:
+        """Tear down the connection and clean up resources for *udid*.
+
+        ``clear_location`` should stay ``True`` for user-initiated
+        disconnect / restore flows where we still have a live transport and
+        want the iPhone to revert to its real GPS immediately.
+
+        Recovery paths (USB/WiFi reconnect, watchdog cleanup after tunnel
+        death, hard reset after DeviceLostError) should pass
+        ``clear_location=False`` so we do not try to clear against a dead or
+        half-rebuilt DVT channel. That clear attempt was re-entering the same
+        broken recovery path and causing the post-reconnect hang seen in the
+        field logs ("DVT channel dropped during clear ... reconnecting").
+        """
         async with self._lock:
             conn = self._connections.pop(udid, None)
 
@@ -361,12 +381,19 @@ class DeviceManager:
             logger.warning("Disconnect requested for unknown device %s", udid)
             return
 
-        # Clear any active location simulation first.
-        if conn.location_service is not None:
+        # Clear any active location simulation first, unless the caller is
+        # already in a transport-recovery path and explicitly asked us not to
+        # touch the stale DVT channel.
+        if clear_location and conn.location_service is not None:
             try:
-                await conn.location_service.clear()
+                await conn.location_service.clear(strict=True)
             except Exception:
                 logger.exception("Error clearing location on disconnect for %s", udid)
+        elif not clear_location and conn.location_service is not None:
+            logger.info(
+                "Skipping location clear while disconnecting %s during recovery teardown",
+                udid,
+            )
 
         # Shut down the DVT provider if it was opened.
         if conn.dvt_provider is not None:
@@ -451,37 +478,13 @@ class DeviceManager:
         will then attempt DVT directly and produce a clean error if
         dtservicehub isn't advertised.
         """
-        try:
-            from pymobiledevice3.services.mobile_image_mounter import MobileImageMounterService
-        except ImportError as exc:
-            logger.warning(
-                "pymobiledevice3 mobile_image_mounter not importable (%s: %s); "
-                "skipping DDI status check", type(exc).__name__, exc,
-            )
-            return
-
-        mounted = False
-        try:
-            mounter = MobileImageMounterService(lockdown=conn.lockdown)
-            try:
-                await mounter.connect()
-                mounted = await mounter.is_image_mounted("Personalized")
-            finally:
-                try:
-                    await mounter.close()
-                except Exception:
-                    pass
-        except Exception:
-            logger.warning("Could not query DDI mount status on %s", conn.udid, exc_info=True)
+        mounted = await self._query_personalized_ddi_mounted(conn)
+        if mounted is None:
             return
 
         if mounted:
             logger.info("Personalized DDI already mounted on %s; DVT should work", conn.udid)
-            try:
-                from api.websocket import broadcast
-                await broadcast("ddi_mounted", {"udid": conn.udid})
-            except Exception:
-                pass
+            await self._broadcast_ddi_event("ddi_mounted", {"udid": conn.udid})
             return
 
         logger.warning(
@@ -489,17 +492,157 @@ class DeviceManager:
             "auto-mount; please mount DDI for this iPhone first, then "
             "reconnect.", conn.udid,
         )
+        await self._broadcast_ddi_event("ddi_not_mounted", {
+            "udid": conn.udid,
+            "hint": (
+                "iPhone 上未偵測到 DDI。請先為這支 iPhone 掛載一次 DDI(Developer Disk Image),"
+                "再重新連接 LocWarp;或先重開 iPhone 後再試。"
+            ),
+        })
+
+    async def _broadcast_ddi_event(self, event: str, payload: dict) -> None:
         try:
             from api.websocket import broadcast
-            await broadcast("ddi_not_mounted", {
-                "udid": conn.udid,
-                "hint": (
-                    "iPhone 上未偵測到 DDI。請先為這支 iPhone 掛載一次 DDI(Developer Disk Image),"
-                    "再重新連接 LocWarp;或先重開 iPhone 後再試。"
-                ),
-            })
+            await broadcast(event, payload)
         except Exception:
             pass
+
+    async def _query_personalized_ddi_mounted(self, conn: _ActiveConnection) -> Optional[bool]:
+        try:
+            from pymobiledevice3.services.mobile_image_mounter import MobileImageMounterService
+        except ImportError as exc:
+            logger.warning(
+                "pymobiledevice3 mobile_image_mounter not importable (%s: %s); "
+                "skipping DDI status check", type(exc).__name__, exc,
+            )
+            return None
+
+        try:
+            mounter = MobileImageMounterService(lockdown=conn.lockdown)
+            try:
+                await mounter.connect()
+                return await mounter.is_image_mounted("Personalized")
+            finally:
+                try:
+                    await mounter.close()
+                except Exception:
+                    pass
+        except Exception:
+            logger.warning("Could not query DDI mount status on %s", conn.udid, exc_info=True)
+            return None
+
+    def _personalized_ddi_cache_paths(self) -> dict[str, Path]:
+        base = Path.home() / ".pymobiledevice3" / "Xcode_iOS_DDI_Personalized"
+        return {
+            "base": base,
+            "image": base / "Image.dmg",
+            "manifest": base / "BuildManifest.plist",
+            "trustcache": base / "Image.trustcache",
+        }
+
+    async def _mount_cached_personalized_ddi(self, conn: _ActiveConnection) -> bool:
+        try:
+            from pymobiledevice3.exceptions import AlreadyMountedError
+            from pymobiledevice3.services.mobile_image_mounter import PersonalizedImageMounter
+        except ImportError as exc:
+            raise DDIMountError(
+                "ddi_mount_failed",
+                f"無法載入 Personalized DDI 掛載模組: {exc}",
+            ) from exc
+
+        cache = self._personalized_ddi_cache_paths()
+        missing = [str(path) for key, path in cache.items() if key != "base" and not path.exists()]
+        if missing:
+            raise DDIMountError(
+                "ddi_cache_missing",
+                "本機找不到已快取的 Personalized DDI 素材，缺少: " + ", ".join(missing),
+            )
+
+        logger.info(
+            "Personalized DDI repair requested for %s; using cached files from %s",
+            conn.udid,
+            cache["base"],
+        )
+        await self._broadcast_ddi_event("ddi_mounting", {
+            "udid": conn.udid,
+            "stage": "cached-image",
+        })
+
+        mounter = PersonalizedImageMounter(lockdown=conn.lockdown)
+        try:
+            await asyncio.wait_for(
+                mounter.mount(cache["image"], cache["manifest"], cache["trustcache"]),
+                timeout=120.0,
+            )
+            logger.info("Personalized DDI mounted successfully for %s", conn.udid)
+            await self._broadcast_ddi_event("ddi_mounted", {"udid": conn.udid})
+            return True
+        except AlreadyMountedError:
+            logger.info("Personalized DDI already mounted during repair flow for %s", conn.udid)
+            await self._broadcast_ddi_event("ddi_mounted", {"udid": conn.udid})
+            return True
+        except Exception as exc:
+            logger.warning("Personalized DDI mount failed for %s", conn.udid, exc_info=True)
+            await self._broadcast_ddi_event("ddi_mount_failed", {
+                "udid": conn.udid,
+                "error": str(exc),
+            })
+            raise DDIMountError(
+                "ddi_mount_failed",
+                f"DDI 掛載失敗，請確認 iPhone 已解鎖且開發者模式已開啟: {exc}",
+            ) from exc
+        finally:
+            try:
+                await mounter.close()
+            except Exception:
+                pass
+
+    async def mount_personalized_ddi(self, udid: str) -> dict[str, object]:
+        async with self._lock:
+            conn = self._connections.get(udid)
+
+        if conn is None:
+            raise DDIMountError("device_not_connected", f"找不到已連線裝置: {udid}")
+        if _parse_ios_version(conn.ios_version) < (17, 0):
+            raise DDIMountError(
+                "ddi_mount_unsupported",
+                f"此流程只適用 iOS 17+，目前裝置為 iOS {conn.ios_version}",
+            )
+        if conn.connection_type != "USB":
+            raise DDIMountError(
+                "ddi_mount_needs_usb",
+                "掛載 Personalized DDI 需要 USB 直連，請先插上 iPhone 再試。",
+            )
+
+        mounted = await self._query_personalized_ddi_mounted(conn)
+        if mounted:
+            return {
+                "udid": udid,
+                "already_mounted": True,
+                "mounted": True,
+                "reconnected": False,
+                "message": "Personalized DDI 已經掛載，不需要再次處理。",
+            }
+
+        await self._mount_cached_personalized_ddi(conn)
+
+        logger.info(
+            "Refreshing USB connection after DDI repair for %s so fresh RSD/DVT handles are used",
+            udid,
+        )
+        reconnected = await self.full_reconnect(udid)
+        message = (
+            "DDI 已掛載，且已重新建立 USB 連線。"
+            if reconnected
+            else "DDI 已掛載，但 USB 連線刷新失敗，請手動重新插拔或重新連線。"
+        )
+        return {
+            "udid": udid,
+            "already_mounted": False,
+            "mounted": True,
+            "reconnected": reconnected,
+            "message": message,
+        }
 
     async def _ensure_classic_ddi_mounted(self, conn: _ActiveConnection) -> None:
         """Best-effort Developer Disk Image mount for iOS 16.x devices."""
@@ -718,7 +861,7 @@ class DeviceManager:
         _remember_device_name(udid, device_name)
 
         if udid in self._connections:
-            await self.disconnect(udid)
+            await self.disconnect(udid, clear_location=False)
 
         conn = _ActiveConnection(
             udid=udid,
@@ -904,7 +1047,7 @@ class DeviceManager:
                 ):
                     usb_reconnect_attempted = True
                     logger.warning(
-                        "DVT provider probe still failing for %s over USB (%s: %s); attempting full USB reconnect",
+                        "DVT provider probe still failing for %s over USB (%s: %s); attempting full USB reconnect (phase=full_reconnect)",
                         udid, type(exc).__name__, exc,
                     )
                     try:
@@ -935,7 +1078,7 @@ class DeviceManager:
                         "Ignoring error closing stale DvtProvider for %s",
                         udid, exc_info=True,
                     )
-            logger.info("DVT provider re-acquired for %s", udid)
+            logger.info("DVT provider re-acquired for %s (phase=provider_reacquire)", udid)
             return new_dvt
 
     async def full_reconnect(self, udid: str) -> bool:
@@ -955,6 +1098,7 @@ class DeviceManager:
         conn_type = conn.connection_type if conn else None
 
         if conn_type == "Network":
+            logger.info("full_reconnect starting for %s over Network", udid)
             try:
                 from api.device import _tunnels, _attempt_tunnel_restart
             except ImportError:
@@ -970,20 +1114,24 @@ class DeviceManager:
                 ok = await _attempt_tunnel_restart(
                     udid, runner.target_ip, runner.target_port, None, runner,
                 )
+                logger.info("full_reconnect finished for %s over Network (ok=%s)", udid, bool(ok))
                 return bool(ok)
             except Exception:
                 logger.exception("full_reconnect: WiFi tunnel restart failed for %s", udid)
                 return False
 
         # USB (or unknown type — try the bluntest recovery available).
+        logger.info("full_reconnect starting for %s over USB", udid)
         try:
             try:
-                await self.disconnect(udid)
+                await self.disconnect(udid, clear_location=False)
             except Exception:
                 logger.debug("full_reconnect: USB disconnect failed", exc_info=True)
             await self.connect(udid)
             async with self._lock:
-                return udid in self._connections
+                ok = udid in self._connections
+            logger.info("full_reconnect finished for %s over USB (ok=%s)", udid, ok)
+            return ok
         except Exception:
             logger.exception("full_reconnect: USB reconnect failed for %s", udid)
             return False
