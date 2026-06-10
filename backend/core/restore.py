@@ -35,6 +35,7 @@ class RestoreHandler:
             logger.info("Device location simulation cleared (restored real GPS)")
         except Exception:
             logger.exception("Failed to clear device location")
+            raise
 
         # Reset engine state (keep current_position so user can restart without teleporting)
         engine.distance_traveled = 0.0
