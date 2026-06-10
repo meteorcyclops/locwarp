@@ -29,6 +29,10 @@ const ERROR_I18N: Record<string, { zh: string; en: string }> = {
   tunnel_lost: { zh: 'WiFi Tunnel 連線中斷,請重新建立', en: 'Wi-Fi tunnel dropped, please reconnect' },
   cooldown_active: { zh: '冷卻中,請等待後再跳點', en: 'Cooldown active, wait before teleporting' },
   repair_needs_usb: { zh: '重新配對需要 USB, 請先用線連接 iPhone', en: 'Re-pair needs USB, please connect the iPhone first' },
+  ddi_mount_needs_usb: { zh: '掛載 DDI 需要 USB 直連,請先插上 iPhone', en: 'Mounting DDI requires a direct USB connection, plug in the iPhone first' },
+  ddi_mount_unsupported: { zh: '只有 iOS 17 以上才需要這個 DDI 掛載流程', en: 'This DDI mount flow is only needed on iOS 17 or later' },
+  ddi_cache_missing: { zh: '本機找不到已快取的 Personalized DDI 素材', en: 'No cached personalized DDI files were found on this Mac' },
+  ddi_mount_failed: { zh: 'DDI 掛載失敗,請確認 iPhone 已解鎖且開發者模式已開啟', en: 'DDI mount failed, make sure the iPhone is unlocked and Developer Mode is enabled' },
   usbmux_unavailable: { zh: '無法列出 USB 裝置,請確認驅動與 Apple Mobile Device Service 是否正常', en: 'Cannot list USB devices, check iTunes/Apple Mobile Device Service' },
   trust_failed: { zh: 'USB 信任失敗, 請在 iPhone 上點「信任」後再試', en: 'USB trust failed, tap Trust on the iPhone and retry' },
   remote_pair_failed: { zh: 'RemotePairing 記錄重建失敗, 請以系統管理員身分重啟 LocWarp', en: 'RemotePairing record rebuild failed, restart LocWarp as Administrator' },
@@ -114,6 +118,7 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
 export const listDevices = () => request<any[]>('GET', '/api/device/list')
 export const connectDevice = (udid: string) => request<any>('POST', `/api/device/${udid}/connect`)
 export const disconnectDevice = (udid: string) => request<any>('DELETE', `/api/device/${udid}/connect`)
+export const mountPersonalizedDdi = (udid: string) => request<any>('POST', `/api/device/${encodeURIComponent(udid)}/ddi/mount`)
 export const wifiConnect = (ip: string) => request<any>('POST', '/api/device/wifi/connect', { ip })
 export const wifiScan = () => request<any[]>('GET', '/api/device/wifi/scan')
 export const wifiTunnelStartAndConnect = (ip: string, port = 49152, udid?: string) =>

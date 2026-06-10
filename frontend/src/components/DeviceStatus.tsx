@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { createPortal } from 'react-dom';
-import { wifiTunnelDiscover, wifiTunnelFindPort, wifiRepair, wifiKeepaliveGet, wifiKeepaliveSet, type TunnelInfo } from '../services/api';
+import { wifiTunnelDiscover, wifiTunnelFindPort, wifiRepair, wifiKeepaliveGet, wifiKeepaliveSet, mountPersonalizedDdi, type TunnelInfo } from '../services/api';
 import { useT } from '../i18n';
 
 const MAX_TUNNEL_DEVICES = 3;
@@ -106,6 +106,8 @@ const DeviceStatus: React.FC<DeviceStatusProps> = ({
   const [showRepairConfirm, setShowRepairConfirm] = useState(false);
   const [repairState, setRepairState] = useState<'idle' | 'running' | 'success' | 'failed'>('idle');
   const [repairMessage, setRepairMessage] = useState<string>('');
+  const [ddiMountState, setDdiMountState] = useState<'idle' | 'running' | 'success' | 'failed'>('idle');
+  const [ddiMountMessage, setDdiMountMessage] = useState<string>('');
 
   const handleRepair = async () => {
     setRepairState('running');
@@ -117,6 +119,18 @@ const DeviceStatus: React.FC<DeviceStatusProps> = ({
     } catch (err: any) {
       setRepairState('failed');
       setRepairMessage(err?.message || 'Unknown error');
+    }
+  };
+  const handleDdiMount = async (udid: string) => {
+    setDdiMountState('running');
+    setDdiMountMessage('');
+    try {
+      const res = await mountPersonalizedDdi(udid);
+      setDdiMountState('success');
+      setDdiMountMessage(res?.message || t('ddi.mount_success'));
+    } catch (err: any) {
+      setDdiMountState('failed');
+      setDdiMountMessage(err?.message || t('ddi.mount_failed'));
     }
   };
   const [scanning, setScanning] = useState(false);
@@ -198,6 +212,8 @@ const DeviceStatus: React.FC<DeviceStatusProps> = ({
         <div style={{ flex: 1, minWidth: 0 }}>
           {device ? (() => {
             const isWifi = device.connectionType === 'Network';
+            const iosMajor = Number.parseInt(String(device.iosVersion || '0').split('.')[0] || '0', 10);
+            const showDdiRepair = !isWifi && Number.isFinite(iosMajor) && iosMajor >= 17;
             const activeTunnel = isWifi ? tunnels.find((tn) => tn.udid === device.id) : null;
             const pinned = activeTunnel ? pinnedUdids.includes(device.id) : false;
             return (
@@ -246,6 +262,38 @@ const DeviceStatus: React.FC<DeviceStatusProps> = ({
                     >
                       {t('wifi.tunnel_stop')}
                     </button>
+                  </div>
+                )}
+                {showDdiRepair && (
+                  <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap', marginTop: 6 }}>
+                    <button
+                      onClick={() => { if (ddiMountState !== 'running') void handleDdiMount(device.id); }}
+                      disabled={ddiMountState === 'running'}
+                      title={t('ddi.mount_tooltip')}
+                      style={{
+                        fontSize: 11,
+                        padding: '3px 10px',
+                        borderRadius: 4,
+                        cursor: ddiMountState === 'running' ? 'default' : 'pointer',
+                        border: '1px solid rgba(108, 140, 255, 0.45)',
+                        background: 'rgba(108, 140, 255, 0.12)',
+                        color: '#9ac0ff',
+                        opacity: ddiMountState === 'running' ? 0.7 : 1,
+                      }}
+                    >
+                      {ddiMountState === 'running' ? t('ddi.mount_running') : t('ddi.mount_button')}
+                    </button>
+                    {ddiMountMessage && (
+                      <span
+                        style={{
+                          fontSize: 11,
+                          color: ddiMountState === 'failed' ? '#ff8a80' : 'var(--text-muted)',
+                          opacity: 0.9,
+                        }}
+                      >
+                        {ddiMountMessage}
+                      </span>
+                    )}
                   </div>
                 )}
               </>

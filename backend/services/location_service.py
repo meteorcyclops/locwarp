@@ -68,7 +68,7 @@ class LocationService(ABC):
         """Simulate the device location to the given coordinates."""
 
     @abstractmethod
-    async def clear(self) -> None:
+    async def clear(self, *, strict: bool = True) -> None:
         """Stop simulating and restore the real device location."""
 
 
@@ -96,7 +96,7 @@ class DvtLocationService(LocationService):
         and hand back a DvtProvider built on the live lockdown.
     """
 
-    CLEAR_TIMEOUT_SECONDS = 5.0
+    CLEAR_TIMEOUT_SECONDS = 8.0
 
     def __init__(
         self,
@@ -147,7 +147,7 @@ class DvtLocationService(LocationService):
             if self._dvt_factory is not None:
                 try:
                     self._dvt = await self._dvt_factory()
-                    logger.info("DVT provider re-acquired via factory")
+                    logger.info("DVT provider re-acquired via factory (phase=provider_reacquire)")
                     return
                 except DeviceLostError:
                     raise
@@ -172,7 +172,7 @@ class DvtLocationService(LocationService):
                     new_dvt = DvtProvider(self._lockdown)
                     await new_dvt.__aenter__()
                     self._dvt = new_dvt
-                    logger.info("DVT provider reconnected on attempt %d", attempt)
+                    logger.info("DVT provider reconnected on attempt %d (phase=provider_reacquire)", attempt)
                     return
                 except Exception as exc:
                     last_exc = exc
@@ -185,7 +185,7 @@ class DvtLocationService(LocationService):
                 new_dvt = DvtProvider(self._lockdown)
                 await new_dvt.__aenter__()
                 self._dvt = new_dvt
-                logger.info("DVT provider reconnected on final attempt")
+                logger.info("DVT provider reconnected on final attempt (phase=provider_reacquire)")
                 return
             except Exception as exc:
                 last_exc = exc
@@ -195,7 +195,12 @@ class DvtLocationService(LocationService):
                 reason=DeviceLostError.REASON_LOCKDOWN_DEAD,
             ) from last_exc
 
-    async def _clear_once(self) -> None:
+    async def _clear_once(self, *, phase: str) -> None:
+        logger.debug(
+            "DVT clear phase=%s starting (timeout=%.1fs)",
+            phase,
+            self.CLEAR_TIMEOUT_SECONDS,
+        )
         sim = await self._ensure_instrument()
         await asyncio.wait_for(sim.clear(), timeout=self.CLEAR_TIMEOUT_SECONDS)
 
@@ -206,79 +211,104 @@ class DvtLocationService(LocationService):
                 sim = await self._ensure_instrument()
                 await sim.set(lat, lng)
                 self._active = True
-                logger.info("DVT location set to (%.6f, %.6f)", lat, lng)
+                logger.info("DVT set phase=initial to (%.6f, %.6f)", lat, lng)
             except (ConnectionTerminatedError, OSError, EOFError, BrokenPipeError,
                     ConnectionResetError, asyncio.TimeoutError) as exc:
-                logger.warning("DVT channel dropped (%s: %s); reconnecting and retrying",
-                               type(exc).__name__, exc)
+                logger.warning(
+                    "DVT set phase=initial dropped (%s: %s); reconnecting and retrying",
+                    type(exc).__name__, exc,
+                )
                 await self._reconnect()
                 sim = await self._ensure_instrument()
                 await sim.set(lat, lng)
                 self._active = True
-                logger.info("DVT location set to (%.6f, %.6f) after reconnect", lat, lng)
+                logger.info("DVT set phase=after_reconnect to (%.6f, %.6f)", lat, lng)
             except RuntimeError as exc:
                 if not _is_not_connected_runtime_error(exc):
                     logger.exception("Failed to set DVT simulated location")
                     raise
-                logger.warning("DVT service not connected (%s); reconnecting and retrying", exc)
+                logger.warning("DVT set phase=initial saw stale service (%s); reconnecting", exc)
                 self._location_sim = None
                 await self._reconnect()
                 sim = await self._ensure_instrument()
                 await sim.set(lat, lng)
                 self._active = True
-                logger.info("DVT location set to (%.6f, %.6f) after stale-service reconnect", lat, lng)
+                logger.info("DVT set phase=after_stale_service_reconnect to (%.6f, %.6f)", lat, lng)
             except Exception:
                 logger.exception("Failed to set DVT simulated location")
                 raise
 
-    async def clear(self) -> None:
+    async def clear(self, *, strict: bool = True) -> None:
         """Clear the simulated location via the DVT instrument channel."""
         async with self._op_lock:
             if not self._active:
                 logger.debug("DVT clear called but no simulation is active")
                 return
             try:
-                await self._clear_once()
+                await self._clear_once(phase="initial")
                 self._active = False
-                logger.info("DVT simulated location cleared")
+                logger.info("DVT clear phase=initial succeeded")
             except (ConnectionTerminatedError, OSError, EOFError, BrokenPipeError,
                     ConnectionResetError, asyncio.TimeoutError) as exc:
-                logger.warning("DVT channel dropped during clear (%s: %s); reconnecting",
-                               type(exc).__name__, exc)
+                logger.warning(
+                    "DVT clear phase=initial dropped (%s: %s); reconnecting (strict=%s)",
+                    type(exc).__name__, exc, strict,
+                )
                 await self._reconnect()
+                if not strict:
+                    self._active = False
+                    logger.warning(
+                        "DVT clear phase=after_reconnect switched to best-effort; "
+                        "skipping immediate clear replay on the fresh provider",
+                    )
+                    return
                 try:
-                    await self._clear_once()
+                    await self._clear_once(phase="after_reconnect")
                 except (ConnectionTerminatedError, OSError, EOFError, BrokenPipeError,
                         ConnectionResetError, asyncio.TimeoutError) as retry_exc:
-                    logger.error("DVT clear still failing after reconnect (%s: %s)",
-                                 type(retry_exc).__name__, retry_exc)
+                    logger.error(
+                        "DVT clear phase=after_reconnect still failing (%s: %s)",
+                        type(retry_exc).__name__, retry_exc,
+                    )
                     raise DeviceLostError(
                         f"DVT clear failed after reconnect: {retry_exc}",
                         reason=DeviceLostError.REASON_LOCKDOWN_DEAD,
                     ) from retry_exc
                 self._active = False
-                logger.info("DVT simulated location cleared after reconnect")
+                logger.info("DVT clear phase=after_reconnect succeeded")
             except RuntimeError as exc:
                 if not _is_not_connected_runtime_error(exc):
                     logger.exception("Failed to clear DVT simulated location")
                     raise
-                logger.warning("DVT service not connected during clear (%s); reconnecting", exc)
+                logger.warning(
+                    "DVT clear phase=initial saw stale service (%s); reconnecting (strict=%s)",
+                    exc, strict,
+                )
                 self._location_sim = None
                 await self._reconnect()
+                if not strict:
+                    self._active = False
+                    logger.warning(
+                        "DVT clear phase=after_stale_service_reconnect switched to best-effort; "
+                        "skipping immediate clear replay on the fresh provider",
+                    )
+                    return
                 try:
-                    await self._clear_once()
+                    await self._clear_once(phase="after_stale_service_reconnect")
                 except (ConnectionTerminatedError, OSError, EOFError, BrokenPipeError,
                         ConnectionResetError, asyncio.TimeoutError, RuntimeError) as retry_exc:
                     if isinstance(retry_exc, RuntimeError) and not _is_not_connected_runtime_error(retry_exc):
                         raise
-                    logger.error("DVT clear still stale after reconnect (%s: %s)",
-                                 type(retry_exc).__name__, retry_exc)
+                    logger.error(
+                        "DVT clear phase=after_stale_service_reconnect still failing (%s: %s)",
+                        type(retry_exc).__name__, retry_exc,
+                    )
                     raise DeviceLostError(
                         f"DVT clear failed after stale-service reconnect: {retry_exc}",
                         reason=DeviceLostError.REASON_LOCKDOWN_DEAD,
                     ) from retry_exc
                 self._active = False
-                logger.info("DVT simulated location cleared after stale-service reconnect")
+                logger.info("DVT clear phase=after_stale_service_reconnect succeeded")
             except Exception:
                 logger.exception("Failed to clear DVT simulated location")
                 raise
@@ -346,7 +376,7 @@ class LegacyLocationService(LocationService):
             logger.exception("Failed to set legacy simulated location")
             raise
 
-    async def clear(self) -> None:
+    async def clear(self, *, strict: bool = True) -> None:
         """Clear the simulated location using the legacy service."""
         if not self._active:
             logger.debug("Legacy clear called but no simulation is active")
