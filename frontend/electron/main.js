@@ -292,12 +292,22 @@ function buildMacBackendLifecycleCommand(exe, { start = false } = {}) {
   ]
 
   if (start) {
+    const launcher = [
+      'import os, subprocess',
+      `log_path = ${JSON.stringify(logFile)}`,
+      `pid_path = ${JSON.stringify(pidFile)}`,
+      `cwd = ${JSON.stringify(path.dirname(exe))}`,
+      `exe = ${JSON.stringify(exe)}`,
+      'os.makedirs(os.path.dirname(log_path), exist_ok=True)',
+      'with open(log_path, "ab", buffering=0) as log_file:',
+      '    proc = subprocess.Popen([exe], cwd=cwd, stdin=subprocess.DEVNULL, stdout=log_file, stderr=subprocess.STDOUT, start_new_session=True, close_fds=True)',
+      'with open(pid_path, "w", encoding="utf-8") as pid_file:',
+      '    pid_file.write(str(proc.pid))',
+      'print(f"started pid {proc.pid}")',
+    ].join('\n')
     command.push(
       ': > ' + shellQuote(logFile),
-      'cd ' + shellQuote(path.dirname(exe)),
-      'nohup ' + shellQuote(exe) + ' </dev/null > ' + shellQuote(logFile) + ' 2>&1 &',
-      'echo $! > ' + shellQuote(pidFile),
-      'echo started pid $(cat ' + shellQuote(pidFile) + ')',
+      'python3 -c ' + shellQuote(launcher),
     )
   }
 
