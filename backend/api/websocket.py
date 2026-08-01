@@ -5,6 +5,7 @@ import logging
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from models.schemas import JoystickInput
+from security import ALLOW_INSECURE_LOCAL, is_loopback_host, token_matches
 
 router = APIRouter(tags=["websocket"])
 logger = logging.getLogger(__name__)
@@ -28,7 +29,21 @@ async def broadcast(event_type: str, data: dict):
 
 @router.websocket("/ws/status")
 async def websocket_endpoint(ws: WebSocket):
-    await ws.accept()
+    client_host = ws.client.host if ws.client else None
+    requested_protocols = [
+        item.strip() for item in ws.headers.get("sec-websocket-protocol", "").split(",")
+        if item.strip()
+    ]
+    auth_protocol = next(
+        (item for item in requested_protocols if item.startswith("locwarp.")), None
+    )
+    supplied_token = auth_protocol.removeprefix("locwarp.") if auth_protocol else None
+    if not is_loopback_host(client_host) or not (
+        ALLOW_INSECURE_LOCAL or token_matches(supplied_token)
+    ):
+        await ws.close(code=1008, reason="unauthorized")
+        return
+    await ws.accept(subprotocol=auth_protocol)
     _connections.append(ws)
     logger.info("WebSocket client connected (%d total)", len(_connections))
 

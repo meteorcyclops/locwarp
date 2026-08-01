@@ -1,4 +1,14 @@
-const API = 'http://127.0.0.1:8777'
+const desktopApiConfig = window.electronAPI?.getDesktopApiConfig?.()
+const API = desktopApiConfig?.baseUrl || 'http://127.0.0.1:8777'
+const DESKTOP_TOKEN = desktopApiConfig?.token || ''
+
+export const getDesktopApiToken = () => DESKTOP_TOKEN
+
+function authenticatedHeaders(headers?: HeadersInit): Headers {
+  const result = new Headers(headers)
+  if (DESKTOP_TOKEN) result.set('X-LocWarp-Desktop-Token', DESKTOP_TOKEN)
+  return result
+}
 
 // Connection-refused means backend isn't up yet, retry with backoff.
 // Other HTTP errors (4xx/5xx) are real errors and propagate immediately.
@@ -103,7 +113,7 @@ function formatError(detail: unknown, fallback: string): string {
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
   const opts: RequestInit = {
     method,
-    headers: { 'Content-Type': 'application/json' },
+    headers: authenticatedHeaders({ 'Content-Type': 'application/json' }),
   }
   if (body !== undefined) opts.body = JSON.stringify(body)
   const res = await fetchWithRetry(`${API}${path}`, opts)
@@ -124,6 +134,17 @@ export const wifiScan = () => request<any[]>('GET', '/api/device/wifi/scan')
 export const wifiTunnelStartAndConnect = (ip: string, port = 49152, udid?: string) =>
   request<any>('POST', '/api/device/wifi/tunnel/start-and-connect', { ip, port, ...(udid ? { udid } : {}) })
 export interface TunnelInfo { udid: string; rsd_address?: string; rsd_port?: number; interface?: string; protocol?: string }
+export interface ConnectionHealth {
+  udid: string
+  state: 'usb_absent' | 'stabilizing' | 'connecting' | 'connected' | 'reconnect_backoff' | 'usb_flapping'
+  usb_disconnects_5m: number
+  likely_hardware?: boolean
+  retry_in_seconds?: number
+  stable_samples?: number
+  required_samples?: number
+}
+export const getConnectionDiagnostics = () =>
+  request<{ devices: ConnectionHealth[]; usb_flapping: boolean }>('GET', '/api/diagnostics/connection')
 export const wifiTunnelStatus = () =>
   request<{ tunnels: TunnelInfo[]; running: boolean; rsd_address?: string; rsd_port?: number }>(
     'GET', '/api/device/wifi/tunnel/status',
@@ -301,7 +322,35 @@ export const deleteCategory = (id: string) => request<any>('DELETE', `/api/bookm
 export const reorderBookmarkCategories = (categoryIds: string[]) =>
   request<{ reordered: number }>('POST', '/api/bookmarks/categories/reorder', { category_ids: categoryIds })
 
-export const bookmarksExportUrl = () => `${API}/api/bookmarks/export`
+async function downloadAuthenticated(path: string, fallbackName: string): Promise<void> {
+  const res = await fetchWithRetry(`${API}${path}`, {
+    method: 'GET',
+    headers: authenticatedHeaders(),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }))
+    throw new Error(formatError(err.detail, res.statusText))
+  }
+  const blob = await res.blob()
+  const disposition = res.headers.get('content-disposition') || ''
+  const encoded = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1]
+  const plain = disposition.match(/filename="?([^";]+)"?/i)?.[1]
+  const filename = encoded ? decodeURIComponent(encoded) : (plain || fallbackName)
+  const url = URL.createObjectURL(blob)
+  try {
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = filename
+    anchor.style.display = 'none'
+    document.body.appendChild(anchor)
+    anchor.click()
+    anchor.remove()
+  } finally {
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+  }
+}
+
+export const exportBookmarks = () => downloadAuthenticated('/api/bookmarks/export', 'bookmarks.json')
 
 // Recent places: last 20 flights.
 // kind distinguishes the entry point AND the action, so the UI can show
@@ -367,7 +416,11 @@ export const deleteRouteCategory = (id: string) =>
 export async function importGpx(file: File): Promise<{ status: string; id: string; points: number }> {
   const form = new FormData()
   form.append('file', file)
-  const res = await fetch(`${API}/api/route/gpx/import`, { method: 'POST', body: form })
+  const res = await fetch(`${API}/api/route/gpx/import`, {
+    method: 'POST',
+    body: form,
+    headers: authenticatedHeaders(),
+  })
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: res.statusText }))
     throw new Error(formatError(err.detail, res.statusText))
@@ -375,14 +428,12 @@ export async function importGpx(file: File): Promise<{ status: string; id: strin
   return res.json()
 }
 
-export function exportGpxUrl(routeId: string): string {
-  return `${API}/api/route/gpx/export/${routeId}`
-}
+export const exportGpx = (routeId: string) =>
+  downloadAuthenticated(`/api/route/gpx/export/${encodeURIComponent(routeId)}`, `route-${routeId}.gpx`)
 
 // Bulk JSON export / import for saved routes
-export function exportAllRoutesUrl(): string {
-  return `${API}/api/route/saved/export`
-}
+export const exportAllRoutes = () =>
+  downloadAuthenticated('/api/route/saved/export', 'locwarp-routes.json')
 
 export const importAllRoutes = (data: { routes: any[]; categories?: any[] }) =>
   request<{ imported: number }>('POST', '/api/route/saved/import', data)

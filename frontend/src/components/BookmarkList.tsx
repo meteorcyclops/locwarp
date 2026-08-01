@@ -58,7 +58,7 @@ interface BookmarkListProps {
   // bookmarks at once. Wired separately from onImport so the file-
   // picker flow stays untouched.
   onBulkPaste?: () => void;
-  exportUrl?: string;
+  onExport?: () => Promise<void> | void;
 }
 
 // Preset palette for the color picker. Covers warm + cool + neutral so every
@@ -108,7 +108,7 @@ const BookmarkList: React.FC<BookmarkListProps> = ({
   onShowOnMapChange,
   onImport,
   onBulkPaste,
-  exportUrl,
+  onExport,
 }) => {
   // Prefer the stored color (set at creation, editable via color picker). Only
   // fall back to CATEGORY_COLORS / name hash for legacy categories that have
@@ -570,11 +570,11 @@ const BookmarkList: React.FC<BookmarkListProps> = ({
           </svg>
           {t('bm.add_custom')}
         </button>
-        {exportUrl && (
-          <a
+        {onExport && (
+          <button
             className="action-btn"
-            href={exportUrl}
-            download="bookmarks.json"
+            type="button"
+            onClick={() => { void onExport(); }}
             style={{
               display: 'inline-flex', alignItems: 'center', gap: 4,
               padding: '3px 8px', fontSize: 12, cursor: 'pointer',
@@ -588,7 +588,7 @@ const BookmarkList: React.FC<BookmarkListProps> = ({
               <line x1="12" y1="15" x2="12" y2="3" />
             </svg>
             {t('bm.export')}
-          </a>
+          </button>
         )}
         {onImport && (
           <label

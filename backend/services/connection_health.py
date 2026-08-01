@@ -1,0 +1,78 @@
+"""Structured, low-noise connection health for diagnostics and UI."""
+
+from __future__ import annotations
+
+import time
+from collections import defaultdict, deque
+from typing import Callable
+
+
+class ConnectionHealthTracker:
+    def __init__(
+        self,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+        flap_window: float = 300.0,
+        flap_threshold: int = 3,
+    ) -> None:
+        self._clock = clock
+        self._flap_window = flap_window
+        self._flap_threshold = flap_threshold
+        self._states: dict[str, dict] = {}
+        self._disconnects: dict[str, deque[float]] = defaultdict(deque)
+
+    def _key(self, udid: str) -> str:
+        return udid.lower()
+
+    def _prune(self, key: str, now: float) -> None:
+        events = self._disconnects[key]
+        while events and now - events[0] > self._flap_window:
+            events.popleft()
+
+    def set_state(self, udid: str, state: str, **details) -> dict:
+        now = self._clock()
+        key = self._key(udid)
+        self._prune(key, now)
+        entry = {
+            "udid": udid,
+            "state": state,
+            "updated_monotonic": round(now, 3),
+            "usb_disconnects_5m": len(self._disconnects[key]),
+            **details,
+        }
+        self._states[key] = entry
+        return dict(entry)
+
+    def record_usb_disconnect(self, udid: str, *, lifetime: float) -> dict:
+        now = self._clock()
+        key = self._key(udid)
+        self._disconnects[key].append(now)
+        self._prune(key, now)
+        count = len(self._disconnects[key])
+        state = "usb_flapping" if count >= self._flap_threshold else "usb_absent"
+        return self.set_state(
+            udid,
+            state,
+            connection_lifetime_seconds=round(max(0.0, lifetime), 1),
+            likely_hardware=state == "usb_flapping",
+        )
+
+    def snapshot(self) -> dict:
+        now = self._clock()
+        for key in list(self._disconnects):
+            self._prune(key, now)
+            if key in self._states:
+                self._states[key]["usb_disconnects_5m"] = len(self._disconnects[key])
+                if (
+                    self._states[key]["state"] == "usb_flapping"
+                    and len(self._disconnects[key]) < self._flap_threshold
+                ):
+                    self._states[key]["state"] = "usb_absent"
+                    self._states[key]["likely_hardware"] = False
+        devices = [dict(value) for value in self._states.values()]
+        return {
+            "devices": devices,
+            "usb_flapping": any(item["state"] == "usb_flapping" for item in devices),
+            "flap_window_seconds": self._flap_window,
+            "flap_threshold": self._flap_threshold,
+        }

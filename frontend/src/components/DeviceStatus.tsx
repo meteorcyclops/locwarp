@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { createPortal } from 'react-dom';
-import { wifiTunnelDiscover, wifiTunnelFindPort, wifiRepair, wifiKeepaliveGet, wifiKeepaliveSet, mountPersonalizedDdi, type TunnelInfo } from '../services/api';
+import { wifiTunnelDiscover, wifiTunnelFindPort, wifiRepair, wifiKeepaliveGet, wifiKeepaliveSet, mountPersonalizedDdi, type TunnelInfo, type ConnectionHealth } from '../services/api';
 import { useT } from '../i18n';
 
 const MAX_TUNNEL_DEVICES = 3;
@@ -32,6 +32,7 @@ interface DeviceStatusProps {
   onWifiConnect?: (ip: string) => Promise<any>;
   pinnedUdids?: string[];
   onTogglePin?: (udid: string) => void;
+  connectionHealth?: ConnectionHealth[];
 }
 
 const DeviceStatus: React.FC<DeviceStatusProps> = ({
@@ -47,12 +48,16 @@ const DeviceStatus: React.FC<DeviceStatusProps> = ({
   onWifiConnect,
   pinnedUdids = [],
   onTogglePin,
+  connectionHealth = [],
 }) => {
   const t = useT();
   const [showDropdown, setShowDropdown] = useState(false);
   const [tunnelIp, setTunnelIp] = useState(() => localStorage.getItem('locwarp.tunnel.ip') || '');
   const [tunnelPort, setTunnelPort] = useState(() => localStorage.getItem('locwarp.tunnel.port') || '');
   const [portScanning, setPortScanning] = useState(false);
+  const activeHealth = device
+    ? connectionHealth.find((item) => item.udid.toLowerCase() === device.id.toLowerCase())
+    : connectionHealth.find((item) => item.state === 'usb_flapping') ?? connectionHealth[0];
   // Saved IPs are written by useDevice.startWifiTunnel into
   // locwarp.tunnel.savedips as a max-5 ring buffer. Surface them here so
   // users can re-establish a tunnel to the same iPhone with one click,
@@ -200,6 +205,15 @@ const DeviceStatus: React.FC<DeviceStatusProps> = ({
 
   return (
     <div className={`device-status ${isConnected ? 'device-connected' : 'device-disconnected'}`}>
+      {activeHealth?.state === 'usb_flapping' && (
+        <div style={{
+          marginBottom: 8, padding: '7px 9px', borderRadius: 6, fontSize: 11,
+          color: '#ffcc80', background: 'rgba(255, 152, 0, 0.14)',
+          border: '1px solid rgba(255, 152, 0, 0.35)', lineHeight: 1.45,
+        }}>
+          {t('connection.usb_flapping', { n: activeHealth.usb_disconnects_5m })}
+        </div>
+      )}
       {/* Device info card — no scan button inside */}
       <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, marginBottom: 6 }}>
         <div

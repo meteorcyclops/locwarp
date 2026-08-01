@@ -99,7 +99,7 @@ interface ControlPanelProps {
   onBookmarkShowOnMapChange?: (v: boolean) => void;
   onBookmarkImport?: (file: File) => Promise<void>;
   onBookmarkBulkPaste?: () => void;
-  bookmarkExportUrl?: string;
+  onBookmarkExport?: () => Promise<void> | void;
   savedRoutes: SavedRoute[];
   routeCategories: RouteCategory[];
   onRouteLoad: (id: string) => void;
@@ -111,7 +111,7 @@ interface ControlPanelProps {
   onRouteGpxImport?: (file: File) => Promise<void>;
   onRouteGpxExport?: (id: string) => void;
   onRoutesImportAll?: (file: File) => Promise<void>;
-  routesExportAllUrl?: string;
+  onRoutesExportAll?: () => Promise<void> | void;
   onRouteCategoryAdd?: (name: string, color?: string) => Promise<void> | void;
   onRouteCategoryDelete?: (id: string) => Promise<void> | void;
   onRouteCategoryRename?: (id: string, name: string) => Promise<void> | void;
@@ -286,7 +286,7 @@ const ControlPanel: React.FC<ControlPanelProps> = ({
   onBookmarkShowOnMapChange,
   onBookmarkImport,
   onBookmarkBulkPaste,
-  bookmarkExportUrl,
+  onBookmarkExport,
   savedRoutes,
   routeCategories,
   onRouteLoad,
@@ -298,7 +298,7 @@ const ControlPanel: React.FC<ControlPanelProps> = ({
   onRouteGpxImport,
   onRouteGpxExport,
   onRoutesImportAll,
-  routesExportAllUrl,
+  onRoutesExportAll,
   onRouteCategoryAdd,
   onRouteCategoryDelete,
   onRouteCategoryRename,
@@ -1145,7 +1145,7 @@ const ControlPanel: React.FC<ControlPanelProps> = ({
                   onShowOnMapChange={onBookmarkShowOnMapChange}
                   onImport={onBookmarkImport}
                   onBulkPaste={onBookmarkBulkPaste}
-                  exportUrl={bookmarkExportUrl}
+                  onExport={onBookmarkExport}
                 />
               ) : (
                 <RouteList
@@ -1166,7 +1166,7 @@ const ControlPanel: React.FC<ControlPanelProps> = ({
                   onCategoryRecolor={onRouteCategoryRecolor}
                   onCategoryReorder={onRouteCategoryReorder}
                   onRouteReorder={onRouteReorder}
-                  routesExportAllUrl={routesExportAllUrl}
+                  onRoutesExportAll={onRoutesExportAll}
                   onRoutesImportAll={onRoutesImportAll}
                 />
               )}

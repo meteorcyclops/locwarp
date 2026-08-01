@@ -1242,10 +1242,29 @@ const App: React.FC = () => {
     }
   }, [showToast])
 
-  const handleGpxExport = useCallback((id: string) => {
-    const url = api.exportGpxUrl(id)
-    window.open(url, '_blank')
-  }, [])
+  const handleGpxExport = useCallback(async (id: string) => {
+    try {
+      await api.exportGpx(id)
+    } catch (err: any) {
+      showToast(err.message || 'GPX export failed')
+    }
+  }, [showToast])
+
+  const handleBookmarkExport = useCallback(async () => {
+    try {
+      await api.exportBookmarks()
+    } catch (err: any) {
+      showToast(err.message || 'bookmark export failed')
+    }
+  }, [showToast])
+
+  const handleRoutesExportAll = useCallback(async () => {
+    try {
+      await api.exportAllRoutes()
+    } catch (err: any) {
+      showToast(err.message || 'route export failed')
+    }
+  }, [showToast])
 
   const handleRoutesImportAll = useCallback(async (file: File) => {
     try {
@@ -1518,6 +1537,7 @@ const App: React.FC = () => {
           tunnels={device.tunnels}
           pinnedUdids={device.pinnedUdids}
           onTogglePin={device.togglePin}
+          connectionHealth={device.connectionHealth}
         />
         </div>
         <div style={{ display: activePage === 'nav' ? 'block' : 'none' }}>
@@ -1707,7 +1727,7 @@ const App: React.FC = () => {
             setBulkPasteCategory(bm.categories[0]?.name || '預設')
             setBulkPasteOpen(true)
           }}
-          bookmarkExportUrl={api.bookmarksExportUrl()}
+          onBookmarkExport={handleBookmarkExport}
           savedRoutes={savedRoutes.map(r => ({
             id: r.id,
             name: r.name,
@@ -1721,7 +1741,7 @@ const App: React.FC = () => {
           onRouteGpxImport={handleGpxImport}
           onRouteGpxExport={handleGpxExport}
           onRoutesImportAll={handleRoutesImportAll}
-          routesExportAllUrl={api.exportAllRoutesUrl()}
+          onRoutesExportAll={handleRoutesExportAll}
           onRouteRename={handleRouteRename}
           onRouteDelete={handleRouteDelete}
           onRoutesBulkDelete={handleRoutesBulkDelete}

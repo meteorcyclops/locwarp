@@ -20,6 +20,11 @@ export interface RestartBackendResult {
   ok: boolean
 }
 
+export interface DesktopApiConfig {
+  baseUrl: string
+  token: string
+}
+
 declare global {
   interface Window {
     electronAPI?: {
@@ -28,6 +33,7 @@ declare global {
       setRenderMode(mode: RenderMode): Promise<{ ok: boolean }>
       relaunchApp(): Promise<void>
       restartBackend(): Promise<RestartBackendResult>
+      getDesktopApiConfig(): DesktopApiConfig
       clipboard?: {
         readText(): Promise<string> | string
         writeText(text: string): Promise<void> | void

@@ -44,7 +44,7 @@ interface RouteListProps {
   // category ID and the ordered list of route IDs.
   onRouteReorder?: (categoryId: string, orderedRouteIds: string[]) => Promise<void> | void;
 
-  routesExportAllUrl?: string;
+  onRoutesExportAll?: () => Promise<void> | void;
   onRoutesImportAll?: (file: File) => Promise<void> | void;
 }
 
@@ -72,7 +72,7 @@ const RouteList: React.FC<RouteListProps> = ({
   onCategoryRecolor,
   onCategoryReorder,
   onRouteReorder,
-  routesExportAllUrl,
+  onRoutesExportAll,
   onRoutesImportAll,
 }) => {
   const t = useT();
@@ -434,12 +434,12 @@ const RouteList: React.FC<RouteListProps> = ({
             />
           </label>
         )}
-        {routesExportAllUrl && (
+        {onRoutesExportAll && (
           routes.length > 0 ? (
-            <a
+            <button
               className="action-btn"
-              href={routesExportAllUrl}
-              download="locwarp-routes.json"
+              type="button"
+              onClick={() => { void onRoutesExportAll(); }}
               title={t('panel.routes_export_all_tooltip')}
               style={{
                 display: 'inline-flex', alignItems: 'center', gap: 4,
@@ -455,7 +455,7 @@ const RouteList: React.FC<RouteListProps> = ({
                 <line x1="12" y1="15" x2="12" y2="3" />
               </svg>
               {t('panel.routes_export_all')}
-            </a>
+            </button>
           ) : (
             <button
               className="action-btn"

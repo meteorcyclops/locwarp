@@ -1,6 +1,8 @@
 import asyncio
 import json
 import logging
+import os
+import time
 from contextlib import asynccontextmanager
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -10,20 +12,33 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from config import API_HOST, API_PORT, SETTINGS_FILE, DEFAULT_LOCATION
+from security import DesktopApiSecurityMiddleware
 from core.device_manager import DeviceManager
 from services.cooldown import CooldownTimer
 from services.bookmarks import BookmarkManager
 from services.route_store import RouteManager
 from services.coord_format import CoordinateFormatter
 from services.reconnect import ReconnectManager
+from services.connection_health import ConnectionHealthTracker
 
 # Configure logging — console + rotating file in ~/.locwarp/logs/
 _log_fmt = "%(asctime)s [%(name)s] %(levelname)s: %(message)s"
 _log_dir = Path.home() / ".locwarp" / "logs"
+_legacy_log_moved: Path | None = None
 try:
     _log_dir.mkdir(parents=True, exist_ok=True)
+    _active_log = _log_dir / "backend.log"
+    # Releases before the non-root migration created backend.log as root.
+    # The user owns the containing directory, so preserve the old file under a
+    # timestamped name and create a fresh writable log without another admin
+    # prompt.  Never delete the diagnostic history.
+    if _active_log.exists() and not os.access(_active_log, os.W_OK):
+        _legacy_log_moved = _log_dir / (
+            f"backend.root-owned-{time.strftime('%Y%m%d-%H%M%S')}.log"
+        )
+        _active_log.rename(_legacy_log_moved)
     _file_handler = RotatingFileHandler(
-        _log_dir / "backend.log",
+        _active_log,
         maxBytes=2 * 1024 * 1024,  # 2 MB
         backupCount=3,
         encoding="utf-8",
@@ -35,6 +50,8 @@ except Exception:
     _handlers = [logging.StreamHandler()]
 logging.basicConfig(level=logging.INFO, format=_log_fmt, handlers=_handlers, force=True)
 logger = logging.getLogger("locwarp")
+if _legacy_log_moved is not None:
+    logger.warning("Preserved legacy root-owned log as %s", _legacy_log_moved)
 
 
 class AppState:
@@ -54,6 +71,7 @@ class AppState:
         self.route_manager = RouteManager()
         self.coord_formatter = CoordinateFormatter()
         self.reconnect_manager = None
+        self.connection_health = ConnectionHealthTracker()
         self._last_position = None
         # User-chosen initial map center (persisted between launches). When
         # None, the frontend falls back to a hardcoded default.
@@ -486,10 +504,22 @@ async def _usbmux_presence_watchdog():
 
             if lost_now:
                 logger.warning("usbmux watchdog: device(s) gone → %s", lost_now)
+                lost_health: list[dict] = []
                 for udid in lost_now:
                     udid_lc = udid.lower()
                     started_at = connection_started_at.pop(udid_lc, now)
                     lifetime = max(0.0, now - started_at)
+                    health = app_state.connection_health.record_usb_disconnect(
+                        udid, lifetime=lifetime
+                    )
+                    lost_health.append(health)
+                    if health["state"] == "usb_flapping":
+                        logger.warning(
+                            "connection_health: usb_flapping udid=%s disconnects_5m=%d; "
+                            "cable/connector/power is now the leading cause",
+                            udid,
+                            health["usb_disconnects_5m"],
+                        )
                     if lifetime < stable_connection_window:
                         failure_count = reconnect_failure_count.get(udid_lc, 0) + 1
                         reconnect_failure_count[udid_lc] = failure_count
@@ -630,7 +660,10 @@ async def _usbmux_presence_watchdog():
                         # the other device(s) are still usable; only the
                         # affected chip in the sidebar needs updating.
                         "remaining_count": len(dm._connections),
+                        "connection_health": lost_health,
                     })
+                    for health in lost_health:
+                        await broadcast("connection_health", health)
                 except Exception:
                     logger.exception("watchdog: broadcast (disconnected) failed")
                 continue  # skip appearance logic this tick
@@ -646,6 +679,15 @@ async def _usbmux_presence_watchdog():
                     appearance_counts.pop(udid_lc, None)
             for udid_lc in new_udids_lc:
                 appearance_counts[udid_lc] = appearance_counts.get(udid_lc, 0) + 1
+                if appearance_counts[udid_lc] <= appearance_stability_threshold:
+                    udid = present_usb_original.get(udid_lc, udid_lc)
+                    health = app_state.connection_health.set_state(
+                        udid,
+                        "stabilizing",
+                        stable_samples=appearance_counts[udid_lc],
+                        required_samples=appearance_stability_threshold,
+                    )
+                    await broadcast("connection_health", health)
 
             stable_new_udids_lc = {
                 udid_lc
@@ -673,6 +715,10 @@ async def _usbmux_presence_watchdog():
                 if now - last < cooldown:
                     continue
                 last_reconnect_attempt[udid_lc] = now
+                health = app_state.connection_health.set_state(
+                    udid, "connecting", attempt=fail_count + 1
+                )
+                await broadcast("connection_health", health)
                 logger.info(
                     "usbmux watchdog: new USB device %s detected, auto-connecting (fail_count=%d, cooldown=%.0fs)",
                     udid, fail_count, cooldown,
@@ -693,6 +739,12 @@ async def _usbmux_presence_watchdog():
                             "ios_version": getattr(conn, "ios_version", ""),
                             "connection_type": getattr(conn, "connection_type", "USB"),
                         })
+                        await broadcast(
+                            "connection_health",
+                            app_state.connection_health.set_state(
+                                udid, "connected", connection_type="USB"
+                            ),
+                        )
                     except Exception:
                         logger.exception("watchdog: broadcast (connected) failed")
                     logger.info("Auto-connect succeeded for %s", udid)
@@ -749,6 +801,13 @@ async def _usbmux_presence_watchdog():
                         reconnect_cooldown_base * (2 ** (fail_count + 1)),
                         reconnect_cooldown_max,
                     )
+                    health = app_state.connection_health.set_state(
+                        udid,
+                        "reconnect_backoff",
+                        attempt=fail_count + 1,
+                        retry_in_seconds=round(next_cooldown, 1),
+                    )
+                    await broadcast("connection_health", health)
                     # Drop full traceback after the first 3 failures so the
                     # log doesn't fill with identical stacks. Cause is always
                     # the same: Trust pending, no admin rights, or firewall
@@ -843,12 +902,13 @@ APP_VERSION = "0.2.190"
 
 app = FastAPI(title="LocWarp", version=APP_VERSION, description="iOS Virtual Location Simulator", lifespan=lifespan)
 
+app.add_middleware(DesktopApiSecurityMiddleware)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=["null", "http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_credentials=False,
     allow_methods=["*"],
-    allow_headers=["*"],
+    allow_headers=["Content-Type", "X-LocWarp-Desktop-Token"],
 )
 
 # Register routers
@@ -861,6 +921,7 @@ from api.recent import router as recent_router
 from api.websocket import router as ws_router
 from api.system import router as system_router
 from api.phone_control import router as phone_router
+from api.diagnostics import router as diagnostics_router
 
 app.include_router(device_router)
 app.include_router(location_router)
@@ -871,6 +932,7 @@ app.include_router(bookmarks_router)
 app.include_router(recent_router)
 app.include_router(ws_router)
 app.include_router(phone_router)
+app.include_router(diagnostics_router)
 
 
 @app.get("/")
@@ -881,6 +943,12 @@ async def root():
         "status": "running",
         "initial_position": app_state.get_initial_position(),
     }
+
+
+@app.get("/healthz", include_in_schema=False)
+async def healthz():
+    """Minimal unauthenticated probe used by the Electron parent process."""
+    return {"status": "ok", "version": APP_VERSION}
 
 
 

@@ -16,6 +16,10 @@ export const STRINGS = {
   'generic.stop': { zh: '停止', en: 'Stop' },
   'generic.start': { zh: '開始', en: 'Start' },
   'generic.pause': { zh: '暫停', en: 'Pause' },
+  'connection.usb_flapping': {
+    zh: 'USB 連線在 5 分鐘內已中斷 {n} 次，較像線材、接頭或供電不穩；請更換線材或 USB 埠。',
+    en: 'USB disconnected {n} times in 5 minutes. Cable, connector, or power instability is likely; try another cable or USB port.',
+  },
   'generic.resume': { zh: '繼續', en: 'Resume' },
   'generic.clear': { zh: '清除', en: 'Clear' },
   'generic.add': { zh: '加入', en: 'Add' },

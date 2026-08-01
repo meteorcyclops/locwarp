@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 from typing import TypedDict
 
@@ -115,5 +116,5 @@ RECONNECT_MAX_RETRIES = 30
 DEFAULT_LOCATION = {"lat": 25.0375, "lng": 121.5637}
 
 # Server
-API_HOST = "0.0.0.0"
-API_PORT = 8777
+API_HOST = os.environ.get("LOCWARP_API_HOST", "0.0.0.0")
+API_PORT = int(os.environ.get("LOCWARP_API_PORT", "8777"))

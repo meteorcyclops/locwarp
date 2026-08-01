@@ -4,6 +4,7 @@ import {
   wifiConnect, wifiScan,
   wifiTunnelStartAndConnect, wifiTunnelStatus, wifiTunnelStop,
   type TunnelInfo,
+  type ConnectionHealth, getConnectionDiagnostics,
 } from '../services/api'
 import type { WsMessage } from './useWebSocket'
 
@@ -31,6 +32,13 @@ export type WsSubscribe = (fn: (m: WsMessage) => void) => () => void
 export function useDevice(subscribe?: WsSubscribe) {
   const [devices, setDevices] = useState<DeviceInfo[]>([])
   const [connectedDevice, setConnectedDevice] = useState<DeviceInfo | null>(null)
+  const [connectionHealth, setConnectionHealth] = useState<ConnectionHealth[]>([])
+
+  useEffect(() => {
+    getConnectionDiagnostics()
+      .then((result) => setConnectionHealth(result.devices || []))
+      .catch(() => {})
+  }, [])
 
   // React to real-time device state broadcasts via the subscribe callback.
   // See useWebSocket.ts for the rationale vs the old useState pattern.
@@ -72,6 +80,13 @@ export function useDevice(subscribe?: WsSubscribe) {
             return list.find((d) => d.is_connected) ?? null
           })
         }).catch(() => {})
+      } else if (msg.type === 'connection_health') {
+        const health = msg.data as ConnectionHealth
+        if (!health?.udid) return
+        setConnectionHealth((prev) => [
+          ...prev.filter((item) => item.udid.toLowerCase() !== health.udid.toLowerCase()),
+          health,
+        ])
       } else if (msg.type === 'device_connected') {
         // Re-fetch list so the newly-connected device appears with correct metadata.
         listDevices().then((list) => {
@@ -487,5 +502,6 @@ export function useDevice(subscribe?: WsSubscribe) {
     startWifiTunnel, checkTunnelStatus, stopTunnel, tunnelStatus, tunnels,
     connectedDevices, primaryDevice,
     pinnedUdids, togglePin,
+    connectionHealth,
   }
 }

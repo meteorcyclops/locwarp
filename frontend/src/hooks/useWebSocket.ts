@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
+import { getDesktopApiToken } from '../services/api'
 
 export interface WsMessage {
   type: string
@@ -42,7 +43,10 @@ export function useWebSocket() {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) return
 
     try {
-      const ws = new WebSocket(WS_URL)
+      const token = getDesktopApiToken()
+      const ws = token
+        ? new WebSocket(WS_URL, [`locwarp.${token}`])
+        : new WebSocket(WS_URL)
       wsRef.current = ws
 
       ws.onopen = () => {
