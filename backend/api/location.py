@@ -1,3 +1,5 @@
+import asyncio
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
@@ -23,8 +25,30 @@ from models.schemas import (
 
 router = APIRouter(prefix="/api/location", tags=["location"])
 
+_engine_recovery_lock = asyncio.Lock()
 
 async def _engine(udid: str | None = None):
+    """Return an engine, allowing only one lazy recovery at a time.
+
+    A bookmark click can produce overlapping UI requests. If the device has
+    just disappeared, both requests used to run the hard-reset path and
+    create competing tunnels. Recheck after taking the lock so followers use
+    the engine built by the first request.
+    """
+    from main import app_state
+
+    eng = app_state.get_engine(udid)
+    if eng is not None:
+        return eng
+
+    async with _engine_recovery_lock:
+        eng = app_state.get_engine(udid)
+        if eng is not None:
+            return eng
+        return await _recover_engine(udid)
+
+
+async def _recover_engine(udid: str | None = None):
     """Return the active SimulationEngine for *udid* (or the primary one if
     unspecified), lazily rebuilding when the slot is empty. On the first
     attempt we just rebuild the engine; if that fails we force a full

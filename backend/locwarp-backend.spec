@@ -31,6 +31,12 @@ ddi_datas, ddi_binaries, ddi_hidden = collect_all('developer_disk_image')
 pyimg4_datas, pyimg4_binaries, pyimg4_hidden = collect_all('pyimg4')
 pyimg4_meta = copy_metadata('pyimg4')
 
+# pyimg4 imports apple_compress and checks its distribution metadata at
+# runtime. Without the dist-info directory the frozen backend skips the DDI
+# status check even though the extension itself is present.
+apple_compress_datas, apple_compress_binaries, apple_compress_hidden = collect_all('apple_compress')
+apple_compress_meta = copy_metadata('apple-compress')
+
 # uvicorn/fastapi also need their sub-modules collected
 uvicorn_hidden = collect_submodules('uvicorn')
 fastapi_hidden = collect_submodules('fastapi')
@@ -44,6 +50,7 @@ hidden = [
     *pytun_hidden,
     *ddi_hidden,
     *pyimg4_hidden,
+    *apple_compress_hidden,
     *uvicorn_hidden,
     *fastapi_hidden,
     *ps_hidden,
@@ -70,9 +77,9 @@ a = Analysis(
     ['main.py'],
     pathex=['.'],
     binaries=[*pmd_binaries, *pytun_binaries, *ddi_binaries, *pyimg4_binaries,
-              *ps_binaries],
+              *apple_compress_binaries, *ps_binaries],
     datas=[*pmd_datas, *pytun_datas, *ddi_datas, *pyimg4_datas, *pyimg4_meta,
-           *ps_datas,
+           *apple_compress_datas, *apple_compress_meta, *ps_datas,
            ('static/phone.html', 'static')],
     hiddenimports=hidden,
     hookspath=[],

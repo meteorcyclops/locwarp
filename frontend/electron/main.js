@@ -278,8 +278,11 @@ function buildMacBackendLifecycleCommand(exe, { start = false } = {}) {
     'set -e',
     'mkdir -p ' + shellQuote(backendRuntimeDir()),
     'stop_pid() { pid="$1"; if [ -n "$pid" ]; then kill "$pid" 2>/dev/null || true; fi; }',
+    'force_stop_pid() { pid="$1"; if [ -n "$pid" ]; then kill -KILL "$pid" 2>/dev/null || true; fi; }',
     'kill_by_name() { for pid in $(pgrep -x ' + shellQuote(backendName) + ' 2>/dev/null || true); do stop_pid "$pid"; done; }',
     'kill_by_port() { for pid in $(lsof -tiTCP:' + BACKEND_PORT + ' -sTCP:LISTEN 2>/dev/null || true); do stop_pid "$pid"; done; }',
+    'force_kill_by_name() { for pid in $(pgrep -x ' + shellQuote(backendName) + ' 2>/dev/null || true); do force_stop_pid "$pid"; done; }',
+    'force_kill_by_port() { for pid in $(lsof -tiTCP:' + BACKEND_PORT + ' -sTCP:LISTEN 2>/dev/null || true); do force_stop_pid "$pid"; done; }',
     'if [ -f ' + shellQuote(pidFile) + ' ]; then PID=$(cat ' + shellQuote(pidFile) + ' 2>/dev/null || true); if [ -n "$PID" ]; then stop_pid "$PID"; fi; rm -f ' + shellQuote(pidFile) + '; fi',
     'kill_by_name',
     'kill_by_port',
@@ -289,6 +292,11 @@ function buildMacBackendLifecycleCommand(exe, { start = false } = {}) {
     '  kill_by_name',
     '  kill_by_port',
     'done',
+    'if pgrep -x ' + shellQuote(backendName) + ' >/dev/null 2>&1 || lsof -tiTCP:' + BACKEND_PORT + ' -sTCP:LISTEN >/dev/null 2>&1; then',
+    '  force_kill_by_name',
+    '  force_kill_by_port',
+    '  sleep 0.5',
+    'fi',
   ]
 
   if (start) {
@@ -369,6 +377,29 @@ async function isBackendReachable(timeoutMs = 1200) {
   })
 }
 
+async function backendVersion(timeoutMs = 1200) {
+  return new Promise((resolve) => {
+    const req = http.get(`http://127.0.0.1:${BACKEND_PORT}/`, (res) => {
+      let body = ''
+      res.setEncoding('utf8')
+      res.on('data', (chunk) => { body += chunk })
+      res.on('end', () => {
+        try {
+          const parsed = JSON.parse(body)
+          resolve(typeof parsed.version === 'string' ? parsed.version : null)
+        } catch {
+          resolve(null)
+        }
+      })
+    })
+    req.on('error', () => resolve(null))
+    req.setTimeout(timeoutMs, () => {
+      try { req.destroy() } catch {}
+      resolve(null)
+    })
+  })
+}
+
 async function startBackend() {
   const exe = resolveBackendExe()
   if (!exe) {
@@ -378,8 +409,12 @@ async function startBackend() {
   console.log('[electron] spawning backend:', exe)
 
   if (await isBackendReachable()) {
-    tailBackendLog()
-    return
+    const runningVersion = await backendVersion()
+    if (process.platform !== 'darwin' || runningVersion === app.getVersion()) {
+      tailBackendLog()
+      return
+    }
+    console.log('[electron] replacing stale backend version:', runningVersion || 'unknown')
   }
 
   if (process.platform === 'darwin') {

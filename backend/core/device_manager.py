@@ -20,6 +20,7 @@ import asyncio
 import inspect
 import logging
 import socket
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Optional
@@ -27,6 +28,7 @@ from typing import Dict, Optional
 from pymobiledevice3.lockdown import create_using_usbmux, create_using_tcp
 from pymobiledevice3.remote.remote_service_discovery import RemoteServiceDiscoveryService
 from pymobiledevice3.remote.tunnel_service import CoreDeviceTunnelProxy
+from pymobiledevice3.remote.userspace_tunnel import UserspaceRsdTunnel
 from pymobiledevice3.services.dvt.instruments.dvt_provider import DvtProvider
 from pymobiledevice3.services.dvt.instruments.location_simulation import LocationSimulation
 from pymobiledevice3.services.simulate_location import DtSimulateLocation
@@ -114,6 +116,7 @@ class _ActiveConnection:
     dvt_provider: Optional[DvtProvider] = None
     tunnel_proxy: Optional[CoreDeviceTunnelProxy] = None
     tunnel_context: object = None  # async context manager for the tunnel
+    userspace_tunnel: Optional[UserspaceRsdTunnel] = None
     rsd: Optional[RemoteServiceDiscoveryService] = None
     location_service: Optional[LocationService] = None
     usbmux_lockdown: object = None  # Original lockdown client (for legacy fallback on iOS 17+)
@@ -136,6 +139,7 @@ class DeviceManager:
     def __init__(self) -> None:
         self._connections: Dict[str, _ActiveConnection] = {}
         self._lock = asyncio.Lock()
+        self._connect_locks: Dict[str, asyncio.Lock] = {}
 
     # ------------------------------------------------------------------
     # Discovery
@@ -242,6 +246,25 @@ class DeviceManager:
     # ------------------------------------------------------------------
 
     async def connect(self, udid: str) -> None:
+        """Serialize connection creation per device.
+
+        The frontend can issue duplicate location requests while a USB device
+        is re-enumerating. Without this lock, both requests can pass the
+        initial ``_connections`` check and build competing CoreDevice
+        tunnels, which makes macOS tear the phone's NCM interface down again.
+        """
+        key = udid.lower()
+        connect_lock = self._connect_locks.setdefault(key, asyncio.Lock())
+        async with connect_lock:
+            try:
+                await asyncio.wait_for(self._connect_once(udid), timeout=20.0)
+            except asyncio.TimeoutError as exc:
+                logger.warning("Connection attempt timed out for %s after 20s", udid)
+                raise RuntimeError(
+                    "USB 裝置連線逾時；請確認線材與接頭穩定後再試。"
+                ) from exc
+
+    async def _connect_once(self, udid: str) -> None:
         """
         Establish a connection appropriate for the device's iOS version.
 
@@ -271,45 +294,100 @@ class DeviceManager:
         logger.info("Connecting to %s via %s", udid, connection_type)
 
         # Create a fresh lockdown client to read the iOS version.
+        lockdown = None
         try:
             lockdown = await create_using_usbmux(serial=udid)
-        except Exception:
-            logger.exception("Cannot create lockdown client for %s via %s", udid, connection_type)
+            ios_version_str: str = lockdown.all_values.get("ProductVersion", "0.0")
+            device_name: str = lockdown.all_values.get("DeviceName", "iPhone")
+            _remember_device_name(udid, device_name)
+            ver = _parse_ios_version(ios_version_str)
+
+            if ver < (16, 0):
+                logger.warning(
+                    "Refusing connect: %s reports iOS %s, below minimum %s",
+                    udid, ios_version_str, UnsupportedIosVersionError.MIN_VERSION,
+                )
+                raise UnsupportedIosVersionError(ios_version_str)
+
+            if ver >= (17, 0):
+                conn = await self._connect_tunnel(udid, lockdown, ios_version_str)
+            else:
+                conn = self._connect_legacy(udid, lockdown, ios_version_str)
+            conn.connection_type = connection_type
+            conn.name = device_name
+
+            async with self._lock:
+                self._connections[udid] = conn
+
+            logger.info("Connected to %s (iOS %s) via %s", udid, ios_version_str, connection_type)
+        except BaseException:
+            if lockdown is not None:
+                try:
+                    maybe_awaitable = lockdown.close()
+                    if inspect.isawaitable(maybe_awaitable):
+                        await maybe_awaitable
+                except Exception:
+                    logger.debug(
+                        "Ignoring error closing failed lockdown for %s",
+                        udid,
+                        exc_info=True,
+                    )
+            logger.exception("Cannot connect to %s via %s", udid, connection_type)
             raise
-
-        ios_version_str: str = lockdown.all_values.get("ProductVersion", "0.0")
-        device_name: str = lockdown.all_values.get("DeviceName", "iPhone")
-        _remember_device_name(udid, device_name)
-        ver = _parse_ios_version(ios_version_str)
-
-        if ver < (16, 0):
-            logger.warning(
-                "Refusing connect: %s reports iOS %s, below minimum %s",
-                udid, ios_version_str, UnsupportedIosVersionError.MIN_VERSION,
-            )
-            raise UnsupportedIosVersionError(ios_version_str)
-
-        if ver >= (17, 0):
-            conn = await self._connect_tunnel(udid, lockdown, ios_version_str)
-        else:
-            conn = self._connect_legacy(udid, lockdown, ios_version_str)
-        conn.connection_type = connection_type
-        conn.name = device_name
-
-        async with self._lock:
-            self._connections[udid] = conn
-
-        logger.info("Connected to %s (iOS %s) via %s", udid, ios_version_str, connection_type)
 
     # -- iOS 17+ via CoreDeviceTunnelProxy ---------------------------------
 
     async def _connect_tunnel(
         self, udid: str, lockdown, ios_version: str
     ) -> _ActiveConnection:
-        """TCP tunnel for iOS 17+ using CoreDeviceTunnelProxy + RSD."""
+        """TCP tunnel for iOS 17+.
+
+        On macOS, prefer pymobiledevice3's in-process userspace tunnel. It
+        avoids installing another kernel ``utun`` route alongside VPN
+        clients, and it is the current pymobiledevice3 default for
+        host-initiated developer services. Other platforms retain the
+        existing kernel tunnel path.
+        """
         logger.debug("Establishing TCP tunnel for %s (iOS %s)", udid, ios_version)
 
         try:
+            # PyTCP supports one userspace tunnel per process. Keep the
+            # existing kernel path available for an additional device in
+            # LocWarp's multi-device mode.
+            has_userspace_tunnel = any(
+                active.userspace_tunnel is not None
+                for active in self._connections.values()
+            )
+            if sys.platform == "darwin" and not has_userspace_tunnel:
+                userspace_tunnel = UserspaceRsdTunnel(
+                    serial=udid,
+                    autopair=True,
+                    remotepairing_fallback=False,
+                )
+                rsd = await userspace_tunnel.aopen()
+                logger.info(
+                    "Userspace RSD tunnel established for %s: %s:%s",
+                    udid,
+                    rsd.service.address[0],
+                    rsd.service.address[1],
+                )
+                try:
+                    await lockdown.close()
+                except Exception:
+                    logger.debug(
+                        "Ignoring error closing discovery lockdown for %s",
+                        udid,
+                        exc_info=True,
+                    )
+                return _ActiveConnection(
+                    udid=udid,
+                    lockdown=rsd,
+                    ios_version=ios_version,
+                    userspace_tunnel=userspace_tunnel,
+                    rsd=rsd,
+                    usbmux_lockdown=None,
+                )
+
             proxy = await CoreDeviceTunnelProxy.create(lockdown)
             tunnel_ctx = proxy.start_tcp_tunnel()
             tunnel_result = await tunnel_ctx.__aenter__()
@@ -403,11 +481,18 @@ class DeviceManager:
                 logger.exception("Error closing DvtProvider for %s", udid)
 
         # Close RSD.
-        if conn.rsd is not None:
+        if conn.rsd is not None and conn.userspace_tunnel is None:
             try:
                 await conn.rsd.close()
             except Exception:
                 logger.exception("Error closing RSD for %s", udid)
+
+        # Close the in-process userspace tunnel after its DVT/RSD consumers.
+        if conn.userspace_tunnel is not None:
+            try:
+                await conn.userspace_tunnel.aclose()
+            except Exception:
+                logger.exception("Error closing userspace tunnel for %s", udid)
 
         # Close tunnel context.
         if conn.tunnel_context is not None:
@@ -424,6 +509,17 @@ class DeviceManager:
                     await maybe_awaitable
             except Exception:
                 logger.exception("Error closing tunnel proxy for %s", udid)
+
+        # Release the original usbmux lockdown session. Reconnects used to
+        # accumulate these sessions indefinitely, adding more pressure to an
+        # already flapping USB transport.
+        if conn.usbmux_lockdown is not None and conn.usbmux_lockdown is not conn.rsd:
+            try:
+                maybe_awaitable = conn.usbmux_lockdown.close()
+                if inspect.isawaitable(maybe_awaitable):
+                    await maybe_awaitable
+            except Exception:
+                logger.exception("Error closing usbmux lockdown for %s", udid)
 
         logger.info("Disconnected device %s", udid)
 

@@ -47,6 +47,7 @@ class AppState:
         # created engine for single-device call sites that have not yet
         # been refactored.
         self.simulation_engines: dict = {}
+        self._engine_locks: dict[str, asyncio.Lock] = {}
         self._primary_udid: str | None = None
         self.cooldown_timer = CooldownTimer()
         self.bookmark_manager = BookmarkManager()
@@ -152,6 +153,15 @@ class AppState:
         return self.simulation_engines.get(udid)
 
     async def create_engine_for_device(self, udid: str):
+        """Serialize engine creation per device."""
+        key = udid.lower()
+        engine_lock = self._engine_locks.setdefault(key, asyncio.Lock())
+        async with engine_lock:
+            if udid in self.simulation_engines:
+                return
+            await self._create_engine_once(udid)
+
+    async def _create_engine_once(self, udid: str):
         """Create a SimulationEngine for the connected device.
 
         Idempotent: if an engine already exists for this udid, we
@@ -324,10 +334,10 @@ async def _usbmux_presence_watchdog():
       actively moving device gets a longer grace window so short iOS 17+
       tunnel renegotiations do not immediately kill the in-flight sim.
     * **Appearance** — a USB device showing up while we have no active
-      connection triggers an auto-connect + engine rebuild, broadcasting
-      device_reconnected when it succeeds. Failed attempts are throttled
-      (min 5 s between retries per UDID) so we don't spam connect() while
-      the device is still in the "Trust this computer?" dialog.
+      connection must remain visible for consecutive polls before it
+      triggers an auto-connect + engine rebuild. Failed and short-lived
+      connections use exponential backoff, so a flapping USB/NCM link does
+      not get hammered by a fresh tunnel attempt every few seconds.
 
     WiFi (Network) devices are skipped on both sides — those are covered by
     the WiFi tunnel watchdog. Consecutive-miss debouncing protects against
@@ -342,6 +352,8 @@ async def _usbmux_presence_watchdog():
     miss_counts: dict[str, int] = {}
     idle_miss_threshold = 3
     active_sim_miss_threshold = 8
+    appearance_counts: dict[str, int] = {}
+    appearance_stability_threshold = 3
     # Key by lowercase UDID because usbmux / pymobiledevice3 can report
     # serial casing differently between list_devices() and connect().
     # Using the raw string here makes a perfectly good reconnect snapshot
@@ -355,15 +367,22 @@ async def _usbmux_presence_watchdog():
         _SS.RANDOM_WALK,
     }
     last_reconnect_attempt: dict[str, float] = {}
+    connection_started_at: dict[str, float] = {}
+    absent_since: dict[str, float] = {}
     # Per-udid consecutive failure count. Drives exponential backoff so a
     # device that consistently fails to connect (Trust pending, Windows
     # firewall blocking the RSD loopback, no admin rights, dead USB cable)
     # doesn't get hammered every 5 seconds for the rest of the session and
-    # spam the log with hundreds of identical tracebacks. Reset on success
-    # OR on disappearance (the user re-plugged after fixing whatever).
+    # spam the log with hundreds of identical tracebacks. A connect() call
+    # returning is not enough to reset this counter: the RSD tunnel can die
+    # one second later. Reset only after a genuinely stable connection, or
+    # after the device has remained absent long enough to indicate a real
+    # unplug/replug rather than USB/NCM re-enumeration.
     reconnect_failure_count: dict[str, int] = {}
     reconnect_cooldown_base = 5.0  # seconds for first retry
     reconnect_cooldown_max = 300.0  # cap at 5 minutes per UDID
+    stable_connection_window = 20.0
+    reset_after_absence = 30.0
 
     while True:
         await asyncio.sleep(1.0)
@@ -402,6 +421,34 @@ async def _usbmux_presence_watchdog():
                 if getattr(r, "connection_type", "USB") == "USB":
                     present_usb_original[r.serial.lower()] = r.serial
             present_usb = set(present_usb_original.keys())
+            now = time.monotonic()
+
+            # Keep failure history across brief disappear/reappear cycles.
+            # iOS 17+ switches through USB/NCM states while creating a
+            # developer tunnel; treating every short absence as a deliberate
+            # replug used to erase the backoff and create a reconnect storm.
+            tracked_reconnects = (
+                set(reconnect_failure_count)
+                | set(last_reconnect_attempt)
+                | set(absent_since)
+            )
+            for udid_lc in tracked_reconnects:
+                if udid_lc in present_usb:
+                    absent_since.pop(udid_lc, None)
+                    continue
+                first_absent = absent_since.setdefault(udid_lc, now)
+                if now - first_absent >= reset_after_absence:
+                    reconnect_failure_count.pop(udid_lc, None)
+                    last_reconnect_attempt.pop(udid_lc, None)
+                    absent_since.pop(udid_lc, None)
+                    appearance_counts.pop(udid_lc, None)
+                    connection_started_at.pop(udid_lc, None)
+                    logger.info(
+                        "usbmux watchdog: reset reconnect backoff for %s "
+                        "after %.0fs continuously absent",
+                        udid_lc,
+                        reset_after_absence,
+                    )
 
             # --- Disappearance detection ---
             # connected / present_usb are lowercase for set math; map
@@ -412,6 +459,19 @@ async def _usbmux_presence_watchdog():
             for udid_lc in connected_usb:
                 if udid_lc in present_usb:
                     miss_counts.pop(udid_lc, None)
+                    started_at = connection_started_at.setdefault(udid_lc, now)
+                    if (
+                        now - started_at >= stable_connection_window
+                        and reconnect_failure_count.get(udid_lc, 0) > 0
+                    ):
+                        reconnect_failure_count.pop(udid_lc, None)
+                        last_reconnect_attempt.pop(udid_lc, None)
+                        logger.info(
+                            "usbmux watchdog: connection %s stable for %.0fs; "
+                            "reconnect backoff cleared",
+                            udid_lc,
+                            stable_connection_window,
+                        )
                 else:
                     udid = connected_usb_original[udid_lc]
                     eng = app_state.simulation_engines.get(udid)
@@ -426,6 +486,21 @@ async def _usbmux_presence_watchdog():
 
             if lost_now:
                 logger.warning("usbmux watchdog: device(s) gone → %s", lost_now)
+                for udid in lost_now:
+                    udid_lc = udid.lower()
+                    started_at = connection_started_at.pop(udid_lc, now)
+                    lifetime = max(0.0, now - started_at)
+                    if lifetime < stable_connection_window:
+                        failure_count = reconnect_failure_count.get(udid_lc, 0) + 1
+                        reconnect_failure_count[udid_lc] = failure_count
+                        last_reconnect_attempt[udid_lc] = now
+                        logger.warning(
+                            "usbmux watchdog: short-lived connection for %s "
+                            "(%.1fs); reconnect failure count=%d",
+                            udid,
+                            lifetime,
+                            failure_count,
+                        )
                 # If the leader is among the lost devices, capture its
                 # snapshot BEFORE we cancel its task so we can hand the
                 # in-flight sim off to whichever follower we promote.
@@ -566,35 +641,38 @@ async def _usbmux_presence_watchdog():
             # their own iPhones plugged in.
             MAX_DEVICES = 3
             new_udids_lc = present_usb - connected_any
-            if not new_udids_lc or len(dm._connections) >= MAX_DEVICES:
+            for udid_lc in list(appearance_counts):
+                if udid_lc not in new_udids_lc:
+                    appearance_counts.pop(udid_lc, None)
+            for udid_lc in new_udids_lc:
+                appearance_counts[udid_lc] = appearance_counts.get(udid_lc, 0) + 1
+
+            stable_new_udids_lc = {
+                udid_lc
+                for udid_lc in new_udids_lc
+                if appearance_counts.get(udid_lc, 0) >= appearance_stability_threshold
+            }
+            if not stable_new_udids_lc or len(dm._connections) >= MAX_DEVICES:
                 continue
             # Map back to the original-case serials from list_devices so
             # downstream dm.connect() sees the format pymobiledevice3
             # itself expects.
-            new_udids = [present_usb_original[lc] for lc in new_udids_lc]
+            new_udids = [present_usb_original[lc] for lc in stable_new_udids_lc]
 
-            # Reset backoff for any UDID that just disappeared from usbmux —
-            # the next time it shows up (re-plug) we want to try immediately,
-            # not at the previous slot's accumulated cooldown.
-            stale = [u for u in reconnect_failure_count if u.lower() not in present_usb_original]
-            for u in stale:
-                reconnect_failure_count.pop(u, None)
-                last_reconnect_attempt.pop(u, None)
-
-            now = time.monotonic()
             for udid in new_udids:
                 if len(dm._connections) >= MAX_DEVICES:
                     break
-                fail_count = reconnect_failure_count.get(udid, 0)
+                udid_lc = udid.lower()
+                fail_count = reconnect_failure_count.get(udid_lc, 0)
                 # 5s, 10s, 20s, 40s, 80s, 160s, 300s, 300s ...
                 cooldown = min(
                     reconnect_cooldown_base * (2 ** fail_count),
                     reconnect_cooldown_max,
                 )
-                last = last_reconnect_attempt.get(udid, 0.0)
+                last = last_reconnect_attempt.get(udid_lc, 0.0)
                 if now - last < cooldown:
                     continue
-                last_reconnect_attempt[udid] = now
+                last_reconnect_attempt[udid_lc] = now
                 logger.info(
                     "usbmux watchdog: new USB device %s detected, auto-connecting (fail_count=%d, cooldown=%.0fs)",
                     udid, fail_count, cooldown,
@@ -602,21 +680,22 @@ async def _usbmux_presence_watchdog():
                 try:
                     await dm.connect(udid)
                     await app_state.create_engine_for_device(udid)
-                    # Broadcast device_connected so the frontend chip row updates.
+                    connection_started_at[udid_lc] = time.monotonic()
+                    appearance_counts.pop(udid_lc, None)
+                    # Broadcast from the connection metadata we just created.
+                    # Calling discover_devices() here opened a second lockdown
+                    # session during the most fragile part of tunnel startup.
                     try:
-                        devs = await dm.discover_devices()
-                        info = next((d for d in devs if d.udid == udid), None)
+                        conn = dm._connections.get(udid)
                         await broadcast("device_connected", {
                             "udid": udid,
-                            "name": info.name if info else "",
-                            "ios_version": info.ios_version if info else "",
-                            "connection_type": info.connection_type if info else "USB",
+                            "name": getattr(conn, "name", ""),
+                            "ios_version": getattr(conn, "ios_version", ""),
+                            "connection_type": getattr(conn, "connection_type", "USB"),
                         })
                     except Exception:
                         logger.exception("watchdog: broadcast (connected) failed")
                     logger.info("Auto-connect succeeded for %s", udid)
-                    last_reconnect_attempt.pop(udid, None)
-                    reconnect_failure_count.pop(udid, None)
 
                     reconnect_snapshot = reconnect_resume_snapshots.pop(udid.lower(), None)
                     if reconnect_snapshot is not None:
@@ -649,7 +728,23 @@ async def _usbmux_presence_watchdog():
                     except Exception:
                         logger.exception("Auto-sync of new device %s to primary failed", udid)
                 except Exception:
-                    reconnect_failure_count[udid] = fail_count + 1
+                    reconnect_failure_count[udid_lc] = fail_count + 1
+                    appearance_counts[udid_lc] = 0
+                    # connect() stores the transport before engine creation.
+                    # If the latter fails, do not leave a half-connected entry
+                    # that prevents the watchdog from ever retrying.
+                    if (
+                        udid in dm._connections
+                        and udid not in app_state.simulation_engines
+                    ):
+                        try:
+                            await dm.disconnect(udid, clear_location=False)
+                        except Exception:
+                            logger.debug(
+                                "Failed to clean up partial connection for %s",
+                                udid,
+                                exc_info=True,
+                            )
                     next_cooldown = min(
                         reconnect_cooldown_base * (2 ** (fail_count + 1)),
                         reconnect_cooldown_max,
@@ -718,20 +813,11 @@ async def _wifi_tunnel_keepalive():
 async def lifespan(application: FastAPI):
     import asyncio
     # ── Startup ──
-    logger.info("LocWarp starting — scanning for devices…")
-    try:
-        devices = await app_state.device_manager.discover_devices()
-        if devices:
-            target = devices[0]
-            logger.info("Found device %s (%s), auto-connecting…", target.name, target.udid)
-            await app_state.device_manager.connect(target.udid)
-            await app_state.create_engine_for_device(target.udid)
-            logger.info("Auto-connected to %s", target.udid)
-        else:
-            logger.info("No iOS devices found on startup")
-    except Exception:
-        logger.exception("Auto-connect on startup failed (device may need manual connect)")
-
+    # The USB watchdog is the single owner of automatic connections. It
+    # requires several consecutive presence samples before connecting, which
+    # prevents an app launch during a USB/NCM re-enumeration from immediately
+    # starting another tunnel and extending the reconnect storm.
+    logger.info("LocWarp starting — waiting for stable USB device presence…")
     watchdog_task = asyncio.create_task(_usbmux_presence_watchdog())
     keepalive_task = asyncio.create_task(_wifi_tunnel_keepalive())
 
@@ -753,7 +839,9 @@ async def lifespan(application: FastAPI):
 
 # ── FastAPI app ───────────────────────────────────────────
 
-app = FastAPI(title="LocWarp", version="0.1.0", description="iOS Virtual Location Simulator", lifespan=lifespan)
+APP_VERSION = "0.2.190"
+
+app = FastAPI(title="LocWarp", version=APP_VERSION, description="iOS Virtual Location Simulator", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -789,7 +877,7 @@ app.include_router(phone_router)
 async def root():
     return {
         "name": "LocWarp",
-        "version": "0.1.0",
+        "version": APP_VERSION,
         "status": "running",
         "initial_position": app_state.get_initial_position(),
     }
