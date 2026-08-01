@@ -7,7 +7,7 @@ import { useT } from '../i18n';
 import LangToggle from './LangToggle';
 import PhoneControlButton from './PhoneControl';
 import SettingsModal from './SettingsModal';
-import pkg from '../../package.json';
+import { BRAND } from '../config/brand';
 import { WeatherIcon, categorize, labelKeyFor } from './WeatherIcon';
 import { useUpdateCheck } from './UpdateChecker';
 import { writeClipboardText } from '../utils/clipboard';
@@ -15,7 +15,7 @@ import { writeClipboardText } from '../utils/clipboard';
 const DEVICE_COLORS = ['#4285f4', '#ff9800'];
 const DEVICE_LETTERS = ['A', 'B'];
 
-const APP_VERSION = (pkg as { version: string }).version;
+const APP_VERSION = BRAND.version;
 
 interface Position {
   lat: number;
@@ -575,6 +575,7 @@ const StatusBar: React.FC<StatusBarProps> = ({
           {now.toLocaleTimeString(undefined, { hour12: false })}
         </span>
         <div style={{ width: 1, height: 12, background: 'rgba(255,255,255,0.12)' }} />
+        <span className="lw-custom-pill" title={BRAND.edition}>{BRAND.shortEdition}</span>
         {updateLatest && updateUrl ? (
           <a
             href={updateUrl}

@@ -140,6 +140,8 @@ export interface ConnectionHealth {
   usb_disconnects_5m: number
   likely_hardware?: boolean
   retry_in_seconds?: number
+  retry_at_unix?: number
+  attempt?: number
   stable_samples?: number
   required_samples?: number
 }

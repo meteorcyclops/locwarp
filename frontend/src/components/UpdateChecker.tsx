@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react';
-import pkg from '../../package.json';
+import { BRAND } from '../config/brand';
 
-const CURRENT = (pkg as { version: string }).version;
-const REPO = 'keezxc1223/locwarp';
+const CURRENT = BRAND.version;
+const REPO = BRAND.repository;
 const API_URL = `https://api.github.com/repos/${REPO}/releases/latest`;
 
 function parseVer(s: string): number[] {

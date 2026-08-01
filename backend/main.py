@@ -806,6 +806,7 @@ async def _usbmux_presence_watchdog():
                         "reconnect_backoff",
                         attempt=fail_count + 1,
                         retry_in_seconds=round(next_cooldown, 1),
+                        retry_at_unix=round(time.time() + next_cooldown, 3),
                     )
                     await broadcast("connection_health", health)
                     # Drop full traceback after the first 3 failures so the

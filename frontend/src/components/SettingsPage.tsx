@@ -9,6 +9,7 @@ import {
 import { getInitialPosition, setInitialPosition } from '../services/api';
 import { useUpdateCheck } from './UpdateChecker';
 import type { RenderMode, RenderModeInfo } from '../types/electron';
+import { BRAND } from '../config/brand';
 
 interface Props {
   onOpenLogFolder: () => void;
@@ -184,11 +185,11 @@ const SettingsPage: React.FC<Props> = ({ onOpenLogFolder, onEnableDeveloperMode 
         <button
           type="button"
           className="ios-row ios-row-tap"
-          onClick={() => window.open(update.releaseUrl || 'https://github.com/keezxc1223/locwarp/releases', '_blank', 'noopener')}
+          onClick={() => window.open(update.releaseUrl || BRAND.releasesUrl, '_blank', 'noopener')}
         >
           <span className="ios-row-label">{t('settings.version')}</span>
           <span className="ios-row-value">
-            v{update.current} · {update.latest ? t('settings.update_available') : t('settings.up_to_date')}
+            {BRAND.shortEdition} · v{update.current} · {update.latest ? t('settings.update_available') : t('settings.up_to_date')}
             <Chevron />
           </span>
         </button>

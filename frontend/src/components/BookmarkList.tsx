@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import { useT } from '../i18n';
 import { getBookmarkUiState, setBookmarkUiState } from '../services/api';
 import { writeClipboardText } from '../utils/clipboard';
+import { initialBookmarkCollapseState } from '../utils/bookmarkCollapse';
 
 const AUTO_COLLAPSE_THRESHOLD = 30;
 
@@ -297,7 +298,8 @@ const BookmarkList: React.FC<BookmarkListProps> = ({
   // /api/bookmarks/ui-state endpoint. The rule, designed so "paste a lot
   // of bookmarks and get them auto-collapsed" always works:
   //
-  //   - While bookmarks.length > AUTO_COLLAPSE_THRESHOLD, all categories
+  //   - The built-in Default category opens whenever the library opens.
+  //   - While bookmarks.length > AUTO_COLLAPSE_THRESHOLD, other categories
   //     are collapsed by default. User can still manually expand one.
   //   - While <= threshold, use the user's saved expand list (or all
   //     expanded if never saved).
@@ -334,21 +336,11 @@ const BookmarkList: React.FC<BookmarkListProps> = ({
     // Only reset when crossing the threshold, or on the very first eval.
     // Between crossings the user's manual toggles are preserved.
     if (wasOver === null || isOver !== wasOver) {
-      if (isOver) {
-        const all: Record<string, boolean> = {};
-        categories.forEach((c) => { all[c] = true; });
-        setCollapsed(all);
-      } else {
-        const saved = savedExpandedRef.current;
-        if (saved === null) {
-          setCollapsed({});
-        } else {
-          const savedSet = new Set(saved);
-          const next: Record<string, boolean> = {};
-          categories.forEach((c) => { next[c] = !savedSet.has(c); });
-          setCollapsed(next);
-        }
-      }
+      setCollapsed(initialBookmarkCollapseState(
+        categories,
+        savedExpandedRef.current,
+        isOver,
+      ));
     }
     prevOverThresholdRef.current = isOver;
   }, [uiStateLoaded, bookmarks.length, categories]);

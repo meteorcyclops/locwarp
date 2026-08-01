@@ -34,6 +34,7 @@ PY
 (
   cd "$repo_dir/frontend"
   npm ci
+  npm test
   npm run build
   npx electron-builder --mac dir --arm64 -c.mac.identity=null
 )

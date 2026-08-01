@@ -35,6 +35,48 @@ interface DeviceStatusProps {
   connectionHealth?: ConnectionHealth[];
 }
 
+const ConnectionHealthCard: React.FC<{ health: ConnectionHealth }> = ({ health }) => {
+  const t = useT();
+  const [now, setNow] = useState(() => Date.now());
+  React.useEffect(() => {
+    if (health.state !== 'reconnect_backoff' || !health.retry_at_unix) return;
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [health.state, health.retry_at_unix]);
+
+  const retrySeconds = health.retry_at_unix
+    ? Math.max(0, Math.ceil(health.retry_at_unix - now / 1000))
+    : Math.max(0, Math.ceil(health.retry_in_seconds ?? 0));
+  const labels: Record<ConnectionHealth['state'], string> = {
+    connected: t('connection.health_connected'),
+    stabilizing: t('connection.health_stabilizing', {
+      current: health.stable_samples ?? 0,
+      required: health.required_samples ?? 0,
+    }),
+    connecting: t('connection.health_connecting', { n: health.attempt ?? 1 }),
+    reconnect_backoff: t('connection.health_backoff'),
+    usb_absent: t('connection.health_absent'),
+    usb_flapping: t('connection.usb_flapping', { n: health.usb_disconnects_5m }),
+  };
+  const details: string[] = [];
+  if (health.state === 'reconnect_backoff' && retrySeconds > 0) {
+    details.push(t('connection.health_retry', { n: retrySeconds }));
+  }
+  if (health.usb_disconnects_5m > 0 && health.state !== 'usb_flapping') {
+    details.push(t('connection.health_disconnects', { n: health.usb_disconnects_5m }));
+  }
+
+  return (
+    <div className={`connection-health-card state-${health.state}`}>
+      <span className="connection-health-pulse" />
+      <span style={{ minWidth: 0 }}>
+        <strong>{labels[health.state]}</strong>
+        {details.length > 0 && <small>{details.join(' · ')}</small>}
+      </span>
+    </div>
+  );
+};
+
 const DeviceStatus: React.FC<DeviceStatusProps> = ({
   device,
   devices,
@@ -205,15 +247,7 @@ const DeviceStatus: React.FC<DeviceStatusProps> = ({
 
   return (
     <div className={`device-status ${isConnected ? 'device-connected' : 'device-disconnected'}`}>
-      {activeHealth?.state === 'usb_flapping' && (
-        <div style={{
-          marginBottom: 8, padding: '7px 9px', borderRadius: 6, fontSize: 11,
-          color: '#ffcc80', background: 'rgba(255, 152, 0, 0.14)',
-          border: '1px solid rgba(255, 152, 0, 0.35)', lineHeight: 1.45,
-        }}>
-          {t('connection.usb_flapping', { n: activeHealth.usb_disconnects_5m })}
-        </div>
-      )}
+      {activeHealth && <ConnectionHealthCard health={activeHealth} />}
       {/* Device info card — no scan button inside */}
       <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, marginBottom: 6 }}>
         <div

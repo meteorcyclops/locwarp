@@ -2971,6 +2971,83 @@ input:focus-visible {
   line-height: 1;
   animation: lw-update-pill-cycle 4s linear infinite;
 }
+
+.lw-custom-pill {
+  padding: 1px 5px;
+  border: 1px solid rgba(113, 139, 255, 0.42);
+  border-radius: 999px;
+  color: #aebdff;
+  background: linear-gradient(135deg, rgba(91, 93, 255, 0.18), rgba(26, 202, 255, 0.1));
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: .08em;
+}
+
+.lw-custom-brand {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 9px 10px;
+  color: #e8edff;
+  text-decoration: none;
+  border: 1px solid rgba(108, 140, 255, 0.24);
+  border-radius: 10px;
+  background: linear-gradient(135deg, rgba(74, 82, 194, 0.16), rgba(23, 158, 204, 0.08));
+  transition: border-color .18s ease, transform .18s ease, background .18s ease;
+}
+.lw-custom-brand:hover {
+  transform: translateY(-1px);
+  border-color: rgba(108, 178, 255, 0.5);
+  background: linear-gradient(135deg, rgba(74, 82, 194, 0.25), rgba(23, 158, 204, 0.14));
+}
+.lw-custom-brand-mark {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 28px;
+  border-radius: 9px;
+  background: linear-gradient(145deg, #7c4dff, #24c8ff);
+  box-shadow: 0 5px 18px rgba(58, 112, 255, .35);
+  color: white;
+  font-size: 15px;
+  font-weight: 900;
+}
+.lw-custom-brand strong, .lw-custom-brand small { display: block; }
+.lw-custom-brand strong { font-size: 12px; letter-spacing: .02em; }
+.lw-custom-brand small { margin-top: 2px; color: var(--text-muted); font-size: 9px; }
+
+.connection-health-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-bottom: 9px;
+  padding: 8px 9px;
+  border: 1px solid rgba(108, 140, 255, .28);
+  border-radius: 8px;
+  color: #c8d5ff;
+  background: linear-gradient(135deg, rgba(66, 93, 181, .13), rgba(25, 177, 214, .07));
+  line-height: 1.35;
+}
+.connection-health-card strong { display: block; font-size: 11px; font-weight: 650; }
+.connection-health-card small { display: block; margin-top: 2px; opacity: .68; font-size: 10px; }
+.connection-health-pulse {
+  width: 8px;
+  height: 8px;
+  margin-top: 3px;
+  flex: 0 0 8px;
+  border-radius: 50%;
+  background: #5f8cff;
+  box-shadow: 0 0 8px rgba(95, 140, 255, .8);
+}
+.connection-health-card.state-connected { color: #9de9c0; border-color: rgba(55, 201, 130, .3); background: rgba(55, 201, 130, .08); }
+.connection-health-card.state-connected .connection-health-pulse { background: #37c982; box-shadow: 0 0 8px rgba(55, 201, 130, .85); }
+.connection-health-card.state-reconnect_backoff,
+.connection-health-card.state-usb_flapping { color: #ffd092; border-color: rgba(255, 160, 67, .38); background: rgba(255, 152, 0, .11); }
+.connection-health-card.state-reconnect_backoff .connection-health-pulse,
+.connection-health-card.state-usb_flapping .connection-health-pulse { background: #ff9f43; box-shadow: 0 0 8px rgba(255, 159, 67, .8); }
+.connection-health-card.state-usb_absent { color: #f1a6a6; border-color: rgba(239, 83, 80, .3); background: rgba(239, 83, 80, .08); }
+.connection-health-card.state-usb_absent .connection-health-pulse { background: #ef5350; box-shadow: 0 0 8px rgba(239, 83, 80, .72); }
 @keyframes lw-update-pill-cycle {
   0%   { background-position: 0% 50%; }
   100% { background-position: 300% 50%; }
