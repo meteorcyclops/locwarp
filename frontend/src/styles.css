@@ -3031,6 +3031,22 @@ input:focus-visible {
 }
 .connection-health-card strong { display: block; font-size: 11px; font-weight: 650; }
 .connection-health-card small { display: block; margin-top: 2px; opacity: .68; font-size: 10px; }
+.connection-health-progress {
+  display: block;
+  width: 100%;
+  height: 3px;
+  margin-top: 6px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, .1);
+}
+.connection-health-progress > span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #6c8cff, #4dd7ff);
+  transition: width .25s ease;
+}
 .connection-health-pulse {
   width: 8px;
   height: 8px;

@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { createPortal } from 'react-dom';
 import { wifiTunnelDiscover, wifiTunnelFindPort, wifiRepair, wifiKeepaliveGet, wifiKeepaliveSet, mountPersonalizedDdi, type TunnelInfo, type ConnectionHealth } from '../services/api';
 import { useT } from '../i18n';
+import { reconcileConnectionHealth } from '../utils/connectionHealth';
 
 const MAX_TUNNEL_DEVICES = 3;
 
@@ -51,7 +52,7 @@ const ConnectionHealthCard: React.FC<{ health: ConnectionHealth }> = ({ health }
     connected: t('connection.health_connected'),
     stabilizing: t('connection.health_stabilizing', {
       current: health.stable_samples ?? 0,
-      required: health.required_samples ?? 0,
+      required: health.required_samples ?? 3,
     }),
     connecting: t('connection.health_connecting', { n: health.attempt ?? 1 }),
     reconnect_backoff: t('connection.health_backoff'),
@@ -59,6 +60,23 @@ const ConnectionHealthCard: React.FC<{ health: ConnectionHealth }> = ({ health }
     usb_flapping: t('connection.usb_flapping', { n: health.usb_disconnects_5m }),
   };
   const details: string[] = [];
+  if (health.state === 'connected') {
+    details.push(t('connection.health_connected_detail'));
+  }
+  if (health.state === 'stabilizing') {
+    const current = health.stable_samples ?? 0;
+    const required = health.required_samples ?? 3;
+    details.push(t('connection.health_stabilizing_detail', {
+      current,
+      remaining: Math.max(0, required - current),
+    }));
+  }
+  if (health.state === 'connecting') {
+    details.push(t('connection.health_connecting_detail'));
+  }
+  if (health.state === 'usb_absent') {
+    details.push(t('connection.health_absent_detail'));
+  }
   if (health.state === 'reconnect_backoff' && retrySeconds > 0) {
     details.push(t('connection.health_retry', { n: retrySeconds }));
   }
@@ -69,9 +87,14 @@ const ConnectionHealthCard: React.FC<{ health: ConnectionHealth }> = ({ health }
   return (
     <div className={`connection-health-card state-${health.state}`}>
       <span className="connection-health-pulse" />
-      <span style={{ minWidth: 0 }}>
+      <span style={{ minWidth: 0, flex: 1 }}>
         <strong>{labels[health.state]}</strong>
         {details.length > 0 && <small>{details.join(' · ')}</small>}
+        {health.state === 'stabilizing' && (
+          <span className="connection-health-progress" aria-hidden="true">
+            <span style={{ width: `${Math.min(100, ((health.stable_samples ?? 0) / Math.max(1, health.required_samples ?? 3)) * 100)}%` }} />
+          </span>
+        )}
       </span>
     </div>
   );
@@ -100,6 +123,14 @@ const DeviceStatus: React.FC<DeviceStatusProps> = ({
   const activeHealth = device
     ? connectionHealth.find((item) => item.udid.toLowerCase() === device.id.toLowerCase())
     : connectionHealth.find((item) => item.state === 'usb_flapping') ?? connectionHealth[0];
+  const displayedHealth = reconcileConnectionHealth(
+    activeHealth,
+    isConnected && device && device.connectionType !== 'Network' ? device.id : null,
+  ) ?? (!device ? {
+    udid: 'no-usb-device',
+    state: 'usb_absent' as const,
+    usb_disconnects_5m: 0,
+  } : undefined);
   // Saved IPs are written by useDevice.startWifiTunnel into
   // locwarp.tunnel.savedips as a max-5 ring buffer. Surface them here so
   // users can re-establish a tunnel to the same iPhone with one click,
@@ -247,7 +278,7 @@ const DeviceStatus: React.FC<DeviceStatusProps> = ({
 
   return (
     <div className={`device-status ${isConnected ? 'device-connected' : 'device-disconnected'}`}>
-      {activeHealth && <ConnectionHealthCard health={activeHealth} />}
+      {displayedHealth && <ConnectionHealthCard health={displayedHealth} />}
       {/* Device info card — no scan button inside */}
       <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, marginBottom: 6 }}>
         <div

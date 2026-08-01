@@ -88,6 +88,20 @@ export function useDevice(subscribe?: WsSubscribe) {
           health,
         ])
       } else if (msg.type === 'device_connected') {
+        const connectedUdid = msg.data?.udid
+        if (connectedUdid) {
+          setConnectionHealth((prev) => {
+            const previous = prev.find((item) => item.udid.toLowerCase() === connectedUdid.toLowerCase())
+            const connected: ConnectionHealth = {
+              ...(previous ?? { udid: connectedUdid, usb_disconnects_5m: 0 }),
+              udid: connectedUdid,
+              state: 'connected',
+              retry_in_seconds: undefined,
+              retry_at_unix: undefined,
+            }
+            return [...prev.filter((item) => item.udid.toLowerCase() !== connectedUdid.toLowerCase()), connected]
+          })
+        }
         // Re-fetch list so the newly-connected device appears with correct metadata.
         listDevices().then((list) => {
           setDevices(list)

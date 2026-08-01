@@ -1409,6 +1409,12 @@ async def connect_device(udid: str):
                 "ios_version": info.ios_version if info else "",
                 "connection_type": info.connection_type if info else "USB",
             })
+            health = app_state.connection_health.set_state(
+                udid,
+                "connected",
+                connection_type=info.connection_type if info else "USB",
+            )
+            await broadcast("connection_health", health)
         except Exception:
             pass
         return {"status": "connected", "udid": udid}
