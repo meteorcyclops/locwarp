@@ -40,16 +40,33 @@ const ConnectionHealthCard: React.FC<{ health: ConnectionHealth }> = ({ health }
   const t = useT();
   const [now, setNow] = useState(() => Date.now());
   React.useEffect(() => {
-    if (health.state !== 'reconnect_backoff' || !health.retry_at_unix) return;
+    if (health.state !== 'reconnect_backoff' && !health.connected_since_unix) return;
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(timer);
-  }, [health.state, health.retry_at_unix]);
+  }, [health.state, health.retry_at_unix, health.connected_since_unix]);
 
   const retrySeconds = health.retry_at_unix
     ? Math.max(0, Math.ceil(health.retry_at_unix - now / 1000))
     : Math.max(0, Math.ceil(health.retry_in_seconds ?? 0));
+  const connectedButUnstable = health.state === 'connected'
+    && (health.likely_hardware === true || health.usb_disconnects_5m >= 3);
+  const formatDuration = (seconds: number) => {
+    const value = Math.max(0, Math.floor(seconds));
+    if (value < 60) return t('connection.health_duration_seconds', { n: value });
+    const minutes = Math.floor(value / 60);
+    if (minutes < 60) return t('connection.health_duration_minutes', { n: minutes });
+    return t('connection.health_duration_hours', {
+      h: Math.floor(minutes / 60),
+      m: minutes % 60,
+    });
+  };
+  const formatClock = (unix?: number) => unix
+    ? new Date(unix * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })
+    : '';
   const labels: Record<ConnectionHealth['state'], string> = {
-    connected: t('connection.health_connected'),
+    connected: connectedButUnstable
+      ? t('connection.health_connected_unstable')
+      : t('connection.health_connected'),
     stabilizing: t('connection.health_stabilizing', {
       current: health.stable_samples ?? 0,
       required: health.required_samples ?? 3,
@@ -61,7 +78,16 @@ const ConnectionHealthCard: React.FC<{ health: ConnectionHealth }> = ({ health }
   };
   const details: string[] = [];
   if (health.state === 'connected') {
-    details.push(t('connection.health_connected_detail'));
+    const uptime = health.connected_since_unix
+      ? now / 1000 - health.connected_since_unix
+      : health.connection_uptime_seconds;
+    if (uptime != null) {
+      details.push(t('connection.health_uptime', { value: formatDuration(uptime) }));
+    }
+    if (!connectedButUnstable) details.push(t('connection.health_connected_detail'));
+    if (connectedButUnstable && health.last_reconnect_unix) {
+      details.push(t('connection.health_last_reconnect', { time: formatClock(health.last_reconnect_unix) }));
+    }
   }
   if (health.state === 'stabilizing') {
     const current = health.stable_samples ?? 0;
@@ -83,9 +109,12 @@ const ConnectionHealthCard: React.FC<{ health: ConnectionHealth }> = ({ health }
   if (health.usb_disconnects_5m > 0 && health.state !== 'usb_flapping') {
     details.push(t('connection.health_disconnects', { n: health.usb_disconnects_5m }));
   }
+  if (health.state !== 'connected' && health.last_disconnect_unix) {
+    details.push(t('connection.health_last_disconnect', { time: formatClock(health.last_disconnect_unix) }));
+  }
 
   return (
-    <div className={`connection-health-card state-${health.state}`}>
+    <div className={`connection-health-card state-${health.state}${connectedButUnstable ? ' is-unstable' : ''}`}>
       <span className="connection-health-pulse" />
       <span style={{ minWidth: 0, flex: 1 }}>
         <strong>{labels[health.state]}</strong>
@@ -148,6 +177,12 @@ const DeviceStatus: React.FC<DeviceStatusProps> = ({
   const [savedIps, setSavedIps] = useState(readSavedIps);
   const [showSavedIps, setShowSavedIps] = useState(false);
   const refreshSavedIps = () => setSavedIps(readSavedIps());
+  const removeSavedIp = (ip: string, port: number) => {
+    const next = readSavedIps().filter((entry) => !(entry.ip === ip && entry.port === port));
+    try { localStorage.setItem('locwarp.tunnel.savedips', JSON.stringify(next)); } catch { /* ignore */ }
+    setSavedIps(next);
+    if (next.length === 0) setShowSavedIps(false);
+  };
   // Map udid -> last known device name, harvested from savedips. Lets the
   // active-tunnel card and recent list keep showing the real phone name
   // after a WiFi drop, instead of falling back to a raw UDID string
@@ -887,9 +922,24 @@ const DeviceStatus: React.FC<DeviceStatusProps> = ({
                                       {entry.ip}:{entry.port}
                                     </div>
                                   </div>
-                                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ opacity: 0.5, flexShrink: 0 }}>
-                                    <polyline points="9 18 15 12 9 6" />
-                                  </svg>
+                                  <button
+                                    type="button"
+                                    title={t('wifi.recent_ip_delete_tooltip')}
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      removeSavedIp(entry.ip, entry.port);
+                                    }}
+                                    style={{
+                                      flexShrink: 0, padding: '2px 4px', lineHeight: 0,
+                                      background: 'transparent', border: 'none', color: '#e07a7a',
+                                      opacity: 0.65, cursor: 'pointer', borderRadius: 3,
+                                    }}
+                                  >
+                                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                                      <line x1="18" y1="6" x2="6" y2="18" />
+                                      <line x1="6" y1="6" x2="18" y2="18" />
+                                    </svg>
+                                  </button>
                                 </div>
                               );
                             })}

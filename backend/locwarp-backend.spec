@@ -40,6 +40,7 @@ apple_compress_meta = copy_metadata('apple-compress')
 # uvicorn/fastapi also need their sub-modules collected
 uvicorn_hidden = collect_submodules('uvicorn')
 fastapi_hidden = collect_submodules('fastapi')
+websockets_hidden = collect_submodules('websockets')
 
 # psutil has a Windows-specific extension module that must be bundled
 # for NIC enumeration to work in the frozen exe.
@@ -53,6 +54,7 @@ hidden = [
     *apple_compress_hidden,
     *uvicorn_hidden,
     *fastapi_hidden,
+    *websockets_hidden,
     *ps_hidden,
     'uvicorn.logging',
     'uvicorn.loops',

@@ -1,6 +1,6 @@
 # LocWarp custom macOS branch
 
-This branch keeps the user's v0.2.190 features while hardening the macOS
+This branch keeps the user's custom features on top of upstream v0.2.192 while hardening the macOS
 runtime.  It is intentionally separate from the upstream tracking branch.
 
 ## Runtime boundary
@@ -24,6 +24,8 @@ Never use that switch in a packaged build.
 report `stabilizing`, `connecting`, `connected`, `reconnect_backoff`,
 `usb_absent`, and `usb_flapping`. Three USB detachments in five minutes mark
 the link as flapping and surface a cable/connector/power warning in the UI.
+The connected view also reports continuous uptime, the rolling five-minute
+disconnect count, and the most recent disconnect/reconnect time.
 
 ## Build and test
 

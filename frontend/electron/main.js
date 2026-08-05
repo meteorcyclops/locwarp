@@ -498,7 +498,7 @@ async function createWindow() {
         const u = new URL(details.url)
         if (OSM_HOSTS.includes(u.hostname)) {
           details.requestHeaders['User-Agent'] =
-            'LocWarp-koxuan/0.2.190 (+https://github.com/meteorcyclops/locwarp)'
+            'LocWarp-koxuan/0.2.193-kx.1 (+https://github.com/meteorcyclops/locwarp)'
           details.requestHeaders['Referer'] = 'https://github.com/meteorcyclops/locwarp'
         }
       } catch {}

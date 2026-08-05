@@ -9,6 +9,25 @@ if [ "$(uname -s)" != "Darwin" ]; then
   exit 1
 fi
 
+# Homebrew Node can temporarily become unloadable after a dependent library
+# upgrade. Prefer it when healthy, otherwise fall back to the newest working
+# NVM runtime so a local release build stays reproducible.
+if ! node --version >/dev/null 2>&1; then
+  nvm_node_dir=""
+  for node_candidate in "${HOME}/.nvm/versions/node"/*/bin/node; do
+    if [ -x "$node_candidate" ] && "$node_candidate" --version >/dev/null 2>&1; then
+      nvm_node_dir=$(dirname "$node_candidate")
+    fi
+  done
+  if [ -n "$nvm_node_dir" ]; then
+    PATH="$nvm_node_dir:$PATH"
+    export PATH
+  fi
+fi
+
+node --version >/dev/null
+npm --version >/dev/null
+
 python3 -m venv "$venv_dir"
 "$venv_dir/bin/python" -m pip install -r "$repo_dir/backend/requirements.txt" "pyinstaller==6.21.0"
 

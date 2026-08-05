@@ -730,6 +730,19 @@ class SimulationEngine:
             self._speed_was_applied = True
             return True
         if not self._active_route_coords:
+            # During an inter-leg pause or route fetch there is no live
+            # movement loop to hot-swap. Preserve the requested profile so
+            # the next leg starts at the new speed instead of restoring the
+            # profile captured when the route began (upstream issue #40).
+            if self.state in (
+                SimulationState.NAVIGATING,
+                SimulationState.LOOPING,
+                SimulationState.MULTI_STOP,
+                SimulationState.RANDOM_WALK,
+            ):
+                self._active_speed_profile = dict(speed_profile)
+                self._speed_was_applied = True
+                return True
             return False
         self._pending_speed_profile = dict(speed_profile)
         self._speed_was_applied = True
@@ -758,7 +771,8 @@ class SimulationEngine:
         # Expose these as instance state so apply_speed can read/swap them
         # mid-flight without racing the handler's local variables.
         self._active_route_coords = list(coords)
-        self._active_speed_profile = dict(speed_profile)
+        if not (self._speed_was_applied and self._active_speed_profile is not None):
+            self._active_speed_profile = dict(speed_profile)
         self._pending_speed_profile = None
         self.total_segments = max(len(coords) - 1, 0)
 
@@ -1034,7 +1048,11 @@ class SimulationEngine:
                     "total": len(user_wps),
                 })
 
-        self._pending_speed_profile = None
+        # A speed change can land after the final movement tick. Promote it
+        # here so the following leg retains the user's newly selected speed.
+        if self._pending_speed_profile is not None:
+            self._active_speed_profile = self._pending_speed_profile
+            self._pending_speed_profile = None
         self._active_route_coords = []
         self._current_speed_mps = 0.0
 

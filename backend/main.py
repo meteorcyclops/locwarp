@@ -899,7 +899,7 @@ async def lifespan(application: FastAPI):
 
 # ── FastAPI app ───────────────────────────────────────────
 
-APP_VERSION = "0.2.190"
+APP_VERSION = "0.2.193-kx.1"
 
 app = FastAPI(title="LocWarp", version=APP_VERSION, description="iOS Virtual Location Simulator", lifespan=lifespan)
 

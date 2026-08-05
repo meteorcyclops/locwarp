@@ -35,9 +35,16 @@ export function useDevice(subscribe?: WsSubscribe) {
   const [connectionHealth, setConnectionHealth] = useState<ConnectionHealth[]>([])
 
   useEffect(() => {
-    getConnectionDiagnostics()
-      .then((result) => setConnectionHealth(result.devices || []))
+    let active = true
+    const refresh = () => getConnectionDiagnostics()
+      .then((result) => { if (active) setConnectionHealth(result.devices || []) })
       .catch(() => {})
+    refresh()
+    // Health counters are a sliding five-minute window. Polling keeps the
+    // displayed count, uptime and stability label accurate even when there
+    // are no WebSocket events during a quiet connection.
+    const timer = window.setInterval(refresh, 10_000)
+    return () => { active = false; window.clearInterval(timer) }
   }, [])
 
   // React to real-time device state broadcasts via the subscribe callback.
@@ -96,6 +103,7 @@ export function useDevice(subscribe?: WsSubscribe) {
               ...(previous ?? { udid: connectedUdid, usb_disconnects_5m: 0 }),
               udid: connectedUdid,
               state: 'connected',
+              is_connected: true,
               retry_in_seconds: undefined,
               retry_at_unix: undefined,
             }

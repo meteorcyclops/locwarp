@@ -139,11 +139,16 @@ export interface ConnectionHealth {
   state: 'usb_absent' | 'stabilizing' | 'connecting' | 'connected' | 'reconnect_backoff' | 'usb_flapping'
   usb_disconnects_5m: number
   likely_hardware?: boolean
+  is_connected?: boolean
   retry_in_seconds?: number
   retry_at_unix?: number
   attempt?: number
   stable_samples?: number
   required_samples?: number
+  connected_since_unix?: number
+  connection_uptime_seconds?: number
+  last_disconnect_unix?: number
+  last_reconnect_unix?: number
 }
 export const getConnectionDiagnostics = () =>
   request<{ devices: ConnectionHealth[]; usb_flapping: boolean }>('GET', '/api/diagnostics/connection')

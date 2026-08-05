@@ -397,7 +397,12 @@ export function useSimulation(subscribe?: WsSubscribe, primaryUdid?: string | nu
           if (d.state) updateRuntime(udid, { state: d.state, ...(d.state === 'idle' || d.state === 'disconnected' ? { routePath: [] } : {}) })
           break
         case 'device_connected':
-          setRuntimes((prev) => prev[udid] ? prev : { ...prev, [udid]: emptyRuntime(udid) })
+          setRuntimes((prev) => ({
+            ...prev,
+            [udid]: prev[udid]
+              ? { ...prev[udid], state: 'idle', error: null }
+              : emptyRuntime(udid),
+          }))
           // A device reconnecting implicitly resolves any prior connection-
           // loss banner (watchdog auto-connect now broadcasts `device_connected`
           // rather than `device_reconnected`; the legacy case still handles

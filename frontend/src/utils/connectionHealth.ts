@@ -10,8 +10,8 @@ export function reconcileConnectionHealth(
     ...(health ?? { udid: connectedUdid, usb_disconnects_5m: 0 }),
     udid: connectedUdid,
     state: 'connected',
+    is_connected: true,
     retry_in_seconds: undefined,
     retry_at_unix: undefined,
   };
 }
-

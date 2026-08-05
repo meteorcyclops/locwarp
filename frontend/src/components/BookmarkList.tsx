@@ -1450,7 +1450,11 @@ const BookmarkList: React.FC<BookmarkListProps> = ({
       )}
 
       {/* Context menu (dismissed via document click listener — see useEffect) */}
-      {contextMenu && createPortal(
+      {contextMenu && (() => {
+        const moveTargets = categories.filter((c) => c !== contextMenu.bm.category);
+        const estHeight = 150 + (categories.length > 1 ? 30 + Math.min(moveTargets.length, 9) * 26 : 0);
+        const menuTop = Math.max(8, Math.min(contextMenu.y, window.innerHeight - estHeight - 8));
+        return createPortal(
         <>
           <div
             data-bookmark-context-menu
@@ -1458,7 +1462,9 @@ const BookmarkList: React.FC<BookmarkListProps> = ({
               position: 'fixed',
               // Clamp to viewport so the menu never falls off-screen.
               left: Math.min(contextMenu.x, window.innerWidth - 160),
-              top: Math.min(contextMenu.y, window.innerHeight - 200),
+              top: menuTop,
+              maxHeight: window.innerHeight - 16,
+              overflowY: 'auto',
               zIndex: 9999,
               background: '#2a2a2e',
               border: '1px solid #444',
@@ -1522,9 +1528,8 @@ const BookmarkList: React.FC<BookmarkListProps> = ({
               <>
                 <div style={{ height: 1, background: '#444', margin: '4px 0' }} />
                 <div style={{ padding: '4px 12px', fontSize: 10, opacity: 0.5 }}>{t('bm.move_to')}</div>
-                {categories
-                  .filter((c) => c !== contextMenu.bm.category)
-                  .map((cat) => (
+                <div style={{ maxHeight: 9 * 26, overflowY: 'auto' }}>
+                  {moveTargets.map((cat) => (
                     <div
                       key={cat}
                       style={ctxItemStyle}
@@ -1549,12 +1554,14 @@ const BookmarkList: React.FC<BookmarkListProps> = ({
                       {displayCat(cat)}
                     </div>
                   ))}
+                </div>
               </>
             )}
           </div>
         </>,
         document.body,
-      )}
+        );
+      })()}
 
       {/* Edit dialog — name + lat + lng */}
       {editDialog && createPortal(
