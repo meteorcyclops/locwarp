@@ -97,20 +97,38 @@ class DvtLocationService(LocationService):
     """
 
     CLEAR_TIMEOUT_SECONDS = 8.0
+    SET_TIMEOUT_SECONDS = 4.0
 
     def __init__(
         self,
         dvt_provider: DvtProvider,
         lockdown=None,
         dvt_factory: Callable[[], Awaitable[DvtProvider]] | None = None,
+        health_callback: Callable[[str, dict], Awaitable[None]] | None = None,
     ) -> None:
         self._dvt = dvt_provider
         self._lockdown = lockdown
         self._dvt_factory = dvt_factory
+        self._health_callback = health_callback
         self._location_sim: LocationSimulation | None = None
         self._active = False
         self._reconnect_lock = asyncio.Lock()
         self._op_lock = asyncio.Lock()
+
+    def set_health_callback(
+        self,
+        callback: Callable[[str, dict], Awaitable[None]] | None,
+    ) -> None:
+        """Attach a low-noise observer for location-channel transitions."""
+        self._health_callback = callback
+
+    async def _notify_health(self, state: str, **details) -> None:
+        if self._health_callback is None:
+            return
+        try:
+            await self._health_callback(state, details)
+        except Exception:
+            logger.debug("Location health callback failed", exc_info=True)
 
     async def _ensure_instrument(self) -> LocationSimulation:
         """Lazily create, connect, and cache the LocationSimulation instrument."""
@@ -204,13 +222,21 @@ class DvtLocationService(LocationService):
         sim = await self._ensure_instrument()
         await asyncio.wait_for(sim.clear(), timeout=self.CLEAR_TIMEOUT_SECONDS)
 
+    async def _set_once(self, lat: float, lng: float) -> None:
+        """Bound one DVT write so a dead RSD channel cannot hang silently."""
+        async def _write() -> None:
+            sim = await self._ensure_instrument()
+            await sim.set(lat, lng)
+
+        await asyncio.wait_for(_write(), timeout=self.SET_TIMEOUT_SECONDS)
+
     async def set(self, lat: float, lng: float) -> None:
         """Simulate the device location using the DVT instrument channel."""
         async with self._op_lock:
             try:
-                sim = await self._ensure_instrument()
-                await sim.set(lat, lng)
+                await self._set_once(lat, lng)
                 self._active = True
+                await self._notify_health("healthy", recovered=False)
                 logger.info("DVT set phase=initial to (%.6f, %.6f)", lat, lng)
             except (ConnectionTerminatedError, OSError, EOFError, BrokenPipeError,
                     ConnectionResetError, asyncio.TimeoutError) as exc:
@@ -218,10 +244,16 @@ class DvtLocationService(LocationService):
                     "DVT set phase=initial dropped (%s: %s); reconnecting and retrying",
                     type(exc).__name__, exc,
                 )
+                await self._notify_health(
+                    "recovering",
+                    reason=type(exc).__name__,
+                    phase="provider_reacquire",
+                    timeout_seconds=self.SET_TIMEOUT_SECONDS,
+                )
                 await self._reconnect()
-                sim = await self._ensure_instrument()
-                await sim.set(lat, lng)
+                await self._set_once(lat, lng)
                 self._active = True
+                await self._notify_health("healthy", recovered=True)
                 logger.info("DVT set phase=after_reconnect to (%.6f, %.6f)", lat, lng)
             except RuntimeError as exc:
                 if not _is_not_connected_runtime_error(exc):
@@ -229,10 +261,15 @@ class DvtLocationService(LocationService):
                     raise
                 logger.warning("DVT set phase=initial saw stale service (%s); reconnecting", exc)
                 self._location_sim = None
+                await self._notify_health(
+                    "recovering",
+                    reason=type(exc).__name__,
+                    phase="provider_reacquire",
+                )
                 await self._reconnect()
-                sim = await self._ensure_instrument()
-                await sim.set(lat, lng)
+                await self._set_once(lat, lng)
                 self._active = True
+                await self._notify_health("healthy", recovered=True)
                 logger.info("DVT set phase=after_stale_service_reconnect to (%.6f, %.6f)", lat, lng)
             except Exception:
                 logger.exception("Failed to set DVT simulated location")

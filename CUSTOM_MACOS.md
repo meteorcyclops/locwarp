@@ -27,6 +27,12 @@ the link as flapping and surface a cable/connector/power warning in the UI.
 The connected view also reports continuous uptime, the rolling five-minute
 disconnect count, and the most recent disconnect/reconnect time.
 
+Active simulations additionally report the last successful location write.
+A DVT write that does not complete within four seconds is treated as a stalled
+location channel: the UI turns amber, shows the stall duration, and reports the
+RSD/DVT rebuild instead of leaving the USB card falsely green. A successful
+retry records the automatic recovery time and returns the card to healthy.
+
 ## Build and test
 
 Run from the repository root:

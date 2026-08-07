@@ -25,6 +25,8 @@ class ConnectionHealthTracker:
         self._connected_since: dict[str, float] = {}
         self._last_disconnect: dict[str, float] = {}
         self._last_reconnect: dict[str, float] = {}
+        self._last_location_success: dict[str, float] = {}
+        self._location_stall_started: dict[str, float] = {}
 
     def _key(self, udid: str) -> str:
         return udid.lower()
@@ -58,6 +60,23 @@ class ConnectionHealthTracker:
             "likely_hardware": disconnect_count >= self._flap_threshold,
             **details,
         }
+        if previous:
+            for field in (
+                "location_active",
+                "location_channel_state",
+                "last_location_success_unix",
+                "last_location_recovery_unix",
+                "location_recovery_reason",
+                "location_recovery_phase",
+            ):
+                if field in previous and field not in details:
+                    entry[field] = previous[field]
+        if state != "connected":
+            entry["location_active"] = False
+            entry["location_channel_state"] = "unavailable"
+            entry.pop("location_recovery_reason", None)
+            entry.pop("location_recovery_phase", None)
+            self._location_stall_started.pop(key, None)
         if key in self._connected_since:
             entry["connected_since_unix"] = round(self._connected_since[key], 3)
             entry["connection_uptime_seconds"] = round(
@@ -69,6 +88,89 @@ class ConnectionHealthTracker:
             entry["last_reconnect_unix"] = round(self._last_reconnect[key], 3)
         self._states[key] = entry
         return dict(entry)
+
+    def get_device(self, udid: str) -> dict | None:
+        entry = self._states.get(self._key(udid))
+        return dict(entry) if entry else None
+
+    def set_location_active(self, udid: str, active: bool) -> dict:
+        key = self._key(udid)
+        entry = dict(self._states.get(key) or self.set_state(udid, "connected"))
+        entry["location_active"] = active
+        if not active:
+            # A handler that aborts because recovery failed emits an idle
+            # simulation state. Keep the channel warning visible until a
+            # later successful write or a real USB state transition clears it.
+            if entry.get("location_channel_state") != "recovering":
+                entry["location_channel_state"] = "idle"
+                entry.pop("location_recovery_reason", None)
+                entry.pop("location_recovery_phase", None)
+                self._location_stall_started.pop(key, None)
+        elif entry.get("location_channel_state") in (None, "idle", "unavailable"):
+            entry["location_channel_state"] = "healthy"
+        self._states[key] = entry
+        return self._with_location_ages(key, entry)
+
+    def record_location_success(self, udid: str, *, recovered: bool = False) -> dict:
+        key = self._key(udid)
+        wall_now = self._wall_clock()
+        entry = dict(self._states.get(key) or self.set_state(udid, "connected"))
+        previous_state = entry.get("location_channel_state")
+        self._last_location_success[key] = wall_now
+        entry.update({
+            "location_active": True,
+            "location_channel_state": "healthy",
+            "last_location_success_unix": round(wall_now, 3),
+        })
+        if recovered or previous_state == "recovering":
+            entry["last_location_recovery_unix"] = round(wall_now, 3)
+        entry.pop("location_recovery_reason", None)
+        entry.pop("location_recovery_phase", None)
+        self._location_stall_started.pop(key, None)
+        self._states[key] = entry
+        return self._with_location_ages(key, entry)
+
+    def record_location_recovering(
+        self,
+        udid: str,
+        *,
+        reason: str | None = None,
+        phase: str | None = None,
+    ) -> dict:
+        key = self._key(udid)
+        wall_now = self._wall_clock()
+        entry = dict(self._states.get(key) or self.set_state(udid, "connected"))
+        self._location_stall_started.setdefault(
+            key,
+            self._last_location_success.get(key, wall_now),
+        )
+        entry.update({
+            "location_active": True,
+            "location_channel_state": "recovering",
+        })
+        if reason:
+            entry["location_recovery_reason"] = reason
+        if phase:
+            entry["location_recovery_phase"] = phase
+        self._states[key] = entry
+        return self._with_location_ages(key, entry)
+
+    def _with_location_ages(self, key: str, entry: dict) -> dict:
+        result = dict(entry)
+        wall_now = self._wall_clock()
+        last_success = self._last_location_success.get(key)
+        if last_success is not None:
+            result["last_location_success_age_seconds"] = round(
+                max(0.0, wall_now - last_success), 1
+            )
+        stall_started = self._location_stall_started.get(key)
+        if stall_started is not None:
+            result["location_stall_seconds"] = round(
+                max(0.0, wall_now - stall_started), 1
+            )
+        else:
+            result.pop("location_stall_seconds", None)
+        return result
 
     def record_usb_disconnect(self, udid: str, *, lifetime: float) -> dict:
         now = self._clock()
@@ -107,7 +209,10 @@ class ConnectionHealthTracker:
                 self._states[key]["connection_uptime_seconds"] = round(
                     max(0.0, wall_now - self._connected_since[key]), 1
                 )
-        devices = [dict(value) for value in self._states.values()]
+        devices = [
+            self._with_location_ages(key, value)
+            for key, value in self._states.items()
+        ]
         return {
             "devices": devices,
             "usb_flapping": any(

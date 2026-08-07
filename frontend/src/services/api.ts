@@ -149,6 +149,14 @@ export interface ConnectionHealth {
   connection_uptime_seconds?: number
   last_disconnect_unix?: number
   last_reconnect_unix?: number
+  location_active?: boolean
+  location_channel_state?: 'idle' | 'healthy' | 'recovering' | 'unavailable'
+  last_location_success_unix?: number
+  last_location_success_age_seconds?: number
+  last_location_recovery_unix?: number
+  location_stall_seconds?: number
+  location_recovery_reason?: string
+  location_recovery_phase?: string
 }
 export const getConnectionDiagnostics = () =>
   request<{ devices: ConnectionHealth[]; usb_flapping: boolean }>('GET', '/api/diagnostics/connection')

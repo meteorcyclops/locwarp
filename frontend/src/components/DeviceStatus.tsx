@@ -50,6 +50,11 @@ const ConnectionHealthCard: React.FC<{ health: ConnectionHealth }> = ({ health }
     : Math.max(0, Math.ceil(health.retry_in_seconds ?? 0));
   const connectedButUnstable = health.state === 'connected'
     && (health.likely_hardware === true || health.usb_disconnects_5m >= 3);
+  const locationRecovering = health.state === 'connected'
+    && health.location_channel_state === 'recovering';
+  const locationActive = health.state === 'connected'
+    && health.location_active === true
+    && health.location_channel_state === 'healthy';
   const formatDuration = (seconds: number) => {
     const value = Math.max(0, Math.floor(seconds));
     if (value < 60) return t('connection.health_duration_seconds', { n: value });
@@ -76,6 +81,11 @@ const ConnectionHealthCard: React.FC<{ health: ConnectionHealth }> = ({ health }
     usb_absent: t('connection.health_absent'),
     usb_flapping: t('connection.usb_flapping', { n: health.usb_disconnects_5m }),
   };
+  const label = locationRecovering
+    ? t('connection.location_recovering')
+    : locationActive
+      ? t('connection.location_active')
+      : labels[health.state];
   const details: string[] = [];
   if (health.state === 'connected') {
     const uptime = health.connected_since_unix
@@ -84,9 +94,25 @@ const ConnectionHealthCard: React.FC<{ health: ConnectionHealth }> = ({ health }
     if (uptime != null) {
       details.push(t('connection.health_uptime', { value: formatDuration(uptime) }));
     }
-    if (!connectedButUnstable) details.push(t('connection.health_connected_detail'));
+    if (locationRecovering) {
+      details.push(t('connection.location_stalled', {
+        value: formatDuration(health.location_stall_seconds ?? health.last_location_success_age_seconds ?? 0),
+      }));
+      details.push(t('connection.location_rebuilding'));
+    } else if (locationActive) {
+      details.push(t('connection.location_last_success', {
+        value: formatDuration(health.last_location_success_unix
+          ? now / 1000 - health.last_location_success_unix
+          : health.last_location_success_age_seconds ?? 0),
+      }));
+    } else if (!connectedButUnstable) {
+      details.push(t('connection.health_connected_detail'));
+    }
     if (connectedButUnstable && health.last_reconnect_unix) {
       details.push(t('connection.health_last_reconnect', { time: formatClock(health.last_reconnect_unix) }));
+    }
+    if (!locationRecovering && health.last_location_recovery_unix) {
+      details.push(t('connection.location_recovered', { time: formatClock(health.last_location_recovery_unix) }));
     }
   }
   if (health.state === 'stabilizing') {
@@ -114,10 +140,10 @@ const ConnectionHealthCard: React.FC<{ health: ConnectionHealth }> = ({ health }
   }
 
   return (
-    <div className={`connection-health-card state-${health.state}${connectedButUnstable ? ' is-unstable' : ''}`}>
+    <div className={`connection-health-card state-${health.state}${connectedButUnstable ? ' is-unstable' : ''}${locationRecovering ? ' is-recovering' : ''}`}>
       <span className="connection-health-pulse" />
       <span style={{ minWidth: 0, flex: 1 }}>
-        <strong>{labels[health.state]}</strong>
+        <strong>{label}</strong>
         {details.length > 0 && <small>{details.join(' · ')}</small>}
         {health.state === 'stabilizing' && (
           <span className="connection-health-progress" aria-hidden="true">

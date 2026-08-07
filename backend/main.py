@@ -201,6 +201,27 @@ class AppState:
 
         loc_service = await self.device_manager.get_location_service(udid)
 
+        async def location_health_callback(channel_state: str, details: dict):
+            previous = self.connection_health.get_device(udid) or {}
+            if channel_state == "recovering":
+                health = self.connection_health.record_location_recovering(
+                    udid,
+                    reason=details.get("reason"),
+                    phase=details.get("phase"),
+                )
+                await broadcast("connection_health", health)
+                return
+            health = self.connection_health.record_location_success(
+                udid,
+                recovered=bool(details.get("recovered")),
+            )
+            if previous.get("location_channel_state") == "recovering":
+                await broadcast("connection_health", health)
+
+        set_health_callback = getattr(loc_service, "set_health_callback", None)
+        if callable(set_health_callback):
+            set_health_callback(location_health_callback)
+
         async def event_callback(event_type: str, data: dict):
             # Always tag emissions with udid so the frontend can route per-device.
             if isinstance(data, dict) and "udid" not in data:
@@ -208,6 +229,14 @@ class AppState:
             await broadcast(event_type, data)
             if event_type == "position_update" and "lat" in data:
                 self.update_last_position(data["lat"], data["lng"])
+                self.connection_health.record_location_success(udid)
+            elif event_type == "state_change":
+                state = data.get("state")
+                active = state not in (None, "idle", "disconnected")
+                previous = self.connection_health.get_device(udid) or {}
+                health = self.connection_health.set_location_active(udid, active)
+                if previous.get("location_active") != active:
+                    await broadcast("connection_health", health)
 
         engine = SimulationEngine(loc_service, event_callback)
         self.simulation_engines[udid] = engine
@@ -899,7 +928,7 @@ async def lifespan(application: FastAPI):
 
 # ── FastAPI app ───────────────────────────────────────────
 
-APP_VERSION = "0.2.193-kx.1"
+APP_VERSION = "0.2.193-kx.2"
 
 app = FastAPI(title="LocWarp", version=APP_VERSION, description="iOS Virtual Location Simulator", lifespan=lifespan)
 

@@ -73,6 +73,48 @@ class ConnectionHealthTrackerTests(unittest.TestCase):
         self.assertTrue(connected["likely_hardware"])
         self.assertTrue(tracker.snapshot()["usb_flapping"])
 
+    def test_location_channel_exposes_stall_and_recovery(self):
+        clock = FakeClock()
+        wall_clock = FakeClock()
+        wall_clock.now = 1_700_000_000
+        tracker = ConnectionHealthTracker(clock=clock, wall_clock=wall_clock)
+        tracker.set_state("ABC", "connected")
+        tracker.set_location_active("ABC", True)
+        tracker.record_location_success("ABC")
+
+        wall_clock.now += 6
+        recovering = tracker.record_location_recovering(
+            "ABC", reason="TimeoutError", phase="provider_reacquire"
+        )
+        self.assertEqual(recovering["state"], "connected")
+        self.assertEqual(recovering["location_channel_state"], "recovering")
+        self.assertEqual(recovering["location_stall_seconds"], 6)
+
+        wall_clock.now += 2
+        recovered = tracker.record_location_success("ABC", recovered=True)
+        self.assertEqual(recovered["location_channel_state"], "healthy")
+        self.assertEqual(recovered["last_location_success_age_seconds"], 0)
+        self.assertEqual(recovered["last_location_recovery_unix"], 1_700_000_008)
+
+    def test_idle_location_does_not_look_stalled(self):
+        tracker = ConnectionHealthTracker()
+        tracker.set_state("ABC", "connected")
+        idle = tracker.set_location_active("ABC", False)
+        self.assertFalse(idle["location_active"])
+        self.assertEqual(idle["location_channel_state"], "idle")
+        self.assertNotIn("location_stall_seconds", idle)
+
+    def test_failed_route_cleanup_preserves_recovery_warning(self):
+        tracker = ConnectionHealthTracker()
+        tracker.set_state("ABC", "connected")
+        tracker.record_location_recovering("ABC", reason="TimeoutError")
+
+        idle = tracker.set_location_active("ABC", False)
+
+        self.assertFalse(idle["location_active"])
+        self.assertEqual(idle["location_channel_state"], "recovering")
+        self.assertIn("location_stall_seconds", idle)
+
 
 if __name__ == "__main__":
     unittest.main()
