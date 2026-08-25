@@ -325,6 +325,53 @@ function resolveBackendExe() {
   return null
 }
 
+// PyInstaller bundles are sometimes quarantined by Windows antivirus after a
+// successful install. Keep the macOS runtime hardening above, but provide the
+// actionable upstream v0.2.193 recovery guidance on Windows when the packaged
+// backend disappears.
+function showBackendMissingDialog(exe, detail) {
+  const zh = (app.getLocale() || '').toLowerCase().startsWith('zh')
+  const msg = zh
+    ? {
+        title: 'LocWarp 無法啟動',
+        message: '找不到背景服務 (locwarp-backend.exe)',
+        detail:
+          '這個檔案通常是被防毒軟體隔離或刪除。\n\n' +
+          '請在 Windows 安全性或第三方防毒軟體中還原 LocWarp，將 ' +
+          'C:\\Program Files\\LocWarp 加入排除項目，再重新安裝。\n\n' +
+          `預期路徑：\n${exe}` +
+          (detail ? `\n\n${detail}` : ''),
+        buttons: ['開啟安裝資料夾', '關閉'],
+      }
+    : {
+        title: 'LocWarp cannot start',
+        message: 'Backend service not found (locwarp-backend.exe)',
+        detail:
+          'Antivirus software may have quarantined or removed this file.\n\n' +
+          'Restore LocWarp in Windows Security or your antivirus product, add ' +
+          'C:\\Program Files\\LocWarp as an exclusion, then reinstall.\n\n' +
+          `Expected path:\n${exe}` +
+          (detail ? `\n\n${detail}` : ''),
+        buttons: ['Open install folder', 'Close'],
+      }
+
+  const choice = dialog.showMessageBoxSync({
+    type: 'error',
+    title: msg.title,
+    message: msg.message,
+    detail: msg.detail,
+    buttons: msg.buttons,
+    defaultId: 0,
+    cancelId: 1,
+    noLink: true,
+  })
+  if (choice === 0) {
+    const dir = fs.existsSync(path.dirname(exe)) ? path.dirname(exe) : process.resourcesPath
+    shell.openPath(dir)
+  }
+  app.quit()
+}
+
 async function isBackendReachable(timeoutMs = 1200) {
   return new Promise((resolve) => {
     const req = http.get(`http://127.0.0.1:${BACKEND_PORT}/healthz`, (res) => {
@@ -366,6 +413,12 @@ async function startBackend() {
   const exe = resolveBackendExe()
   if (!exe) {
     console.error('[electron] backend spawn skipped: executable not found')
+    if (process.platform === 'win32' && app.isPackaged) {
+      showBackendMissingDialog(
+        path.join(process.resourcesPath, 'backend', 'locwarp-backend.exe'),
+        null,
+      )
+    }
     return
   }
   console.log('[electron] spawning backend:', exe)
@@ -400,6 +453,9 @@ async function startBackend() {
   const spawnedProc = backendProc
   spawnedProc.on('error', (error) => {
     console.error('[electron] backend process error:', error.message)
+    if (process.platform === 'win32') {
+      showBackendMissingDialog(exe, error.message)
+    }
   })
   spawnedProc.on('exit', (code, signal) => {
     console.log('[electron] backend exited', { code, signal })
@@ -498,7 +554,7 @@ async function createWindow() {
         const u = new URL(details.url)
         if (OSM_HOSTS.includes(u.hostname)) {
           details.requestHeaders['User-Agent'] =
-            'LocWarp-koxuan/0.2.193-kx.3 (+https://github.com/meteorcyclops/locwarp)'
+            'LocWarp-koxuan/0.2.193-kx.4 (+https://github.com/meteorcyclops/locwarp)'
           details.requestHeaders['Referer'] = 'https://github.com/meteorcyclops/locwarp'
         }
       } catch {}

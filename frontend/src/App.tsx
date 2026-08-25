@@ -425,13 +425,13 @@ const App: React.FC = () => {
           // through the manual save) — without it, only one iPhone keeps
           // auto-connecting on every launch even though both are paired.
           const seen = new Set<string>()
-          const uniq: Array<{ ip: string; port: number; udid?: string }> = []
-          const addCand = (ip: string, port: number, udid?: string) => {
+          const uniq: Array<{ ip: string; port: number; udid?: string; ports?: number[] }> = []
+          const addCand = (ip: string, port: number, udid?: string, ports?: number[]) => {
             const key = `${ip}:${port}`
             if (seen.has(key)) return
             if (alreadyTunneled.has(key)) return
             seen.add(key)
-            uniq.push({ ip, port, udid })
+            uniq.push({ ip, port, udid, ports })
           }
           // When the user has pinned devices, only auto-connect those UDIDs.
           // This prevents a friend's device (present on the same WiFi but
@@ -456,7 +456,10 @@ const App: React.FC = () => {
             try {
               const dres = await api.wifiTunnelDiscover()
               for (const d of (dres?.devices || [])) {
-                addCand(String(d.ip), Number(d.port) || 49152)
+                // d.ports is the full open-port list from the TCP-scan
+                // fallback; a scan can't tell which one is RemotePairing,
+                // so hand them all to the backend to try in order.
+                addCand(String(d.ip), Number(d.port) || 49152, undefined, d.ports)
               }
             } catch { /* discover failed — savedips entries still try */ }
           }
@@ -472,7 +475,7 @@ const App: React.FC = () => {
           // 8s handshake timeout and bail.
           await Promise.allSettled(
             limited.map((entry) =>
-              device.startWifiTunnel(entry.ip, entry.port, entry.udid).catch(() => {}),
+              device.startWifiTunnel(entry.ip, entry.port, entry.udid, entry.ports).catch(() => {}),
             ),
           )
         } catch {

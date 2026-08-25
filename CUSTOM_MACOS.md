@@ -1,6 +1,6 @@
 # LocWarp custom macOS branch
 
-This branch keeps the user's custom features on top of upstream v0.2.192 while hardening the macOS
+This branch keeps the user's custom features on top of upstream v0.2.193 while hardening the macOS
 runtime.  It is intentionally separate from the upstream tracking branch.
 
 ## Runtime boundary

@@ -155,9 +155,22 @@ async def _open_repair_rsd(dm, udid, lockdown, proxy_cls, rsd_cls):
 
     proxy = await proxy_cls.create(lockdown)
     tunnel_ctx = proxy.start_tcp_tunnel()
-    tunnel_result = await tunnel_ctx.__aenter__()
-    rsd = rsd_cls((tunnel_result.address, tunnel_result.port))
-    await rsd.connect()
+    rsd = None
+    try:
+        tunnel_result = await tunnel_ctx.__aenter__()
+        rsd = rsd_cls((tunnel_result.address, tunnel_result.port))
+        await rsd.connect()
+    except Exception:
+        try:
+            if rsd is not None:
+                rsd.close()
+        except Exception:
+            _tunnel_logger.debug("Re-pair: failed to close fallback RSD", exc_info=True)
+        try:
+            await tunnel_ctx.__aexit__(None, None, None)
+        except Exception:
+            _tunnel_logger.debug("Re-pair: failed to close fallback tunnel", exc_info=True)
+        raise
     return rsd, proxy, tunnel_ctx, True
 
 
@@ -334,6 +347,28 @@ class WifiTunnelStartRequest(BaseModel):
     ip: str
     port: int = 49152
     udid: str | None = None
+    # Extra RemotePairing port candidates, in fallback order. iOS re-picks
+    # its RemotePairing port on every boot / network rebind, so a single
+    # remembered port goes stale constantly; /discover and /find_port now
+    # hand back the whole open-port list and the start loop walks it.
+    ports: list[int] | None = None
+
+
+# Ports that sit inside the 49152-65535 dynamic range the scanner sweeps
+# but are never RemotePairing. 62078 is lockdownd: TCP connects fine, so
+# "lowest open port" used to pick it, and the handshake then burned a
+# whole attempt budget on a guaranteed ConnectionTerminatedError.
+NON_REMOTEPAIRING_PORTS = frozenset({62078})
+
+# Ceiling on how long one /wifi/tunnel/start may spend walking candidate
+# ports. Wrong ports normally fail in milliseconds (RST), so this only
+# bites when several candidates are silently dropped by the network.
+TUNNEL_START_BUDGET = 45.0
+
+
+def _filter_remotepairing_ports(ports: list[int]) -> list[int]:
+    """Drop ports we know can't be RemotePairing, preserving order."""
+    return [p for p in ports if p not in NON_REMOTEPAIRING_PORTS]
 
 
 def _get_primary_local_ip() -> str | None:
@@ -433,7 +468,7 @@ async def wifi_tunnel_find_port(req: WifiTunnelFindPortRequest):
     if not ip:
         raise HTTPException(status_code=400, detail="ip required")
     try:
-        ports = await _scan_ports_for_ip(ip)
+        ports = _filter_remotepairing_ports(await _scan_ports_for_ip(ip))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     return {"ip": ip, "ports": ports}
@@ -523,13 +558,19 @@ async def wifi_tunnel_discover():
                     *[_scan_one(ip) for ip in candidates],
                 )
                 for ip, ports in scan_results:
+                    ports = _filter_remotepairing_ports(ports)
                     if not ports:
                         continue
-                    # Use the first open port in the dynamic range. We
-                    # add one entry per IP — the user picks from the list.
+                    # One entry per IP; `port` is the primary guess and
+                    # `ports` carries the rest as fallbacks. A scan can't
+                    # tell RemotePairing apart from any other listener in
+                    # the dynamic range, so the lowest open port is only a
+                    # guess — the tunnel start loop is what actually
+                    # decides, by trying the handshake on each.
                     results.append({
                         "ip": ip,
                         "port": ports[0],
+                        "ports": ports[:8],
                         "host": ip,
                         "name": ip,
                         "method": "tcp_scan",
@@ -985,6 +1026,25 @@ def _build_tunnel_udid_candidates(req: WifiTunnelStartRequest) -> list[str]:
     return candidates
 
 
+def _build_tunnel_port_candidates(req: WifiTunnelStartRequest) -> list[int]:
+    """Return RemotePairing ports to try, in priority order: the port the
+    caller asked for, then any extra candidates it passed along.
+
+    Known-wrong ports are dropped up front so they never consume an attempt.
+    The list may come back empty (e.g. the caller only had 62078); the start
+    loop handles that by falling through to its live re-scan."""
+    ports: list[int] = []
+    for raw in [req.port, *(req.ports or [])]:
+        try:
+            p = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if p <= 0 or p > 65535 or p in ports or p in NON_REMOTEPAIRING_PORTS:
+            continue
+        ports.append(p)
+    return ports
+
+
 @router.post("/wifi/tunnel/start")
 async def wifi_tunnel_start(req: WifiTunnelStartRequest):
     """Start an in-process WiFi tunnel for one device (requires admin).
@@ -1007,9 +1067,10 @@ async def wifi_tunnel_start(req: WifiTunnelStartRequest):
             )
 
         candidates = _build_tunnel_udid_candidates(req)
+        port_candidates = _build_tunnel_port_candidates(req)
         _tunnel_logger.info(
-            "WiFi tunnel start: ip=%s port=%d candidates=%s",
-            req.ip, req.port, candidates,
+            "WiFi tunnel start: ip=%s ports=%s candidates=%s",
+            req.ip, port_candidates or [req.port], candidates,
         )
 
         # If any candidate already has a running tunnel for the same
@@ -1023,74 +1084,136 @@ async def wifi_tunnel_start(req: WifiTunnelStartRequest):
                 existing is not None
                 and existing.is_running()
                 and existing.target_ip == req.ip
-                and existing.target_port == req.port
+                and existing.target_port in (port_candidates or [req.port])
             ):
-                return {"status": "already_running", "udid": cand, **(existing.info or {})}
+                return {
+                    "status": "already_running",
+                    "udid": cand,
+                    "port": existing.target_port,
+                    **(existing.info or {}),
+                }
 
+        # Resolution walks (port × udid). Ports are the outer loop because a
+        # wrong port dooms every udid on it, while a wrong udid fails
+        # pair-verify in well under a second. Ports go stale constantly: iOS
+        # re-picks its RemotePairing port on every boot and network rebind,
+        # and a TCP scan can't tell RemotePairing apart from any other
+        # listener in the dynamic range, so whatever the caller remembered
+        # is only a starting guess.
         last_error: Exception | None = None
-        for cand in candidates:
-            existing = _tunnels.get(cand)
-            if existing is not None and existing.is_running():
-                # This udid already owns a tunnel for a DIFFERENT (ip,
-                # port). Don't tear it down — that would kill an active
-                # connection the user isn't asking us to touch. Just skip
-                # this candidate and try the next one.
-                _tunnel_logger.debug(
-                    "Skipping candidate %s: already tunneling to %s:%s "
-                    "(user requested %s:%s)",
-                    cand, existing.target_ip, existing.target_port,
-                    req.ip, req.port,
-                )
-                continue
-            if existing is not None:
-                # Stale entry (runner not running but slot still held);
-                # safe to clean up before reusing.
-                await _tear_down_tunnel(cand, caller="start_replace_stale")
+        tried_ports: set[int] = set()
+        rescanned = False
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + TUNNEL_START_BUDGET
 
+        while True:
+            while port_candidates:
+                port = port_candidates.pop(0)
+                if port in tried_ports:
+                    continue
+                tried_ports.add(port)
+                if loop.time() >= deadline:
+                    _tunnel_logger.warning(
+                        "WiFi tunnel start budget exhausted for %s after ports %s",
+                        req.ip, sorted(tried_ports),
+                    )
+                    port_candidates.clear()
+                    rescanned = True
+                    break
+
+                for cand in candidates:
+                    existing = _tunnels.get(cand)
+                    if existing is not None and existing.is_running():
+                        # This udid already owns a tunnel for a DIFFERENT (ip,
+                        # port). Don't tear it down — that would kill an active
+                        # connection the user isn't asking us to touch. Just skip
+                        # this candidate and try the next one.
+                        _tunnel_logger.debug(
+                            "Skipping candidate %s: already tunneling to %s:%s "
+                            "(user requested %s:%s)",
+                            cand, existing.target_ip, existing.target_port,
+                            req.ip, port,
+                        )
+                        continue
+                    if existing is not None:
+                        # Stale entry (runner not running but slot still held);
+                        # safe to clean up before reusing.
+                        await _tear_down_tunnel(cand, caller="start_replace_stale")
+
+                    _tunnel_logger.info(
+                        "Trying WiFi tunnel with udid=%s ip=%s port=%d",
+                        cand, req.ip, port,
+                    )
+
+                    # Per-candidate timeout is shorter than the legacy 20s
+                    # budget. Pair-verify against the wrong iPhone fails in
+                    # well under a second.
+                    runner = TunnelRunner()
+                    try:
+                        info = await runner.start(cand, req.ip, port, timeout=8.0)
+                    except asyncio.TimeoutError as e:
+                        last_error = e
+                        _tunnel_logger.warning(
+                            "WiFi tunnel timed out for udid=%s on port %d; "
+                            "nothing is answering RemotePairing there — moving "
+                            "to the next port",
+                            cand, port,
+                        )
+                        # Port-level failure: every other udid on this same
+                        # port would hit the identical wall, so stop burning
+                        # 8s each on them and move on.
+                        break
+                    except Exception as e:
+                        last_error = e
+                        _tunnel_logger.info(
+                            "WiFi tunnel candidate %s on port %d failed (%s); "
+                            "trying next",
+                            cand, port, type(e).__name__,
+                        )
+                        continue
+
+                    _tunnels[cand] = runner
+                    _tunnel_watchdogs[cand] = asyncio.create_task(
+                        _per_tunnel_watchdog(cand, runner)
+                    )
+                    _tunnel_logger.info(
+                        "WiFi tunnel started for %s on port %d: %s", cand, port, info,
+                    )
+                    return {"status": "started", "udid": cand, "port": port, **info}
+
+            if rescanned:
+                break
+
+            # Every port the caller knew about is exhausted. Before giving
+            # up, scan the iPhone once for what it is actually listening on
+            # right now — this is the common case after a reboot, where the
+            # remembered port simply no longer exists.
+            rescanned = True
             _tunnel_logger.info(
-                "Trying WiFi tunnel with udid=%s ip=%s port=%d",
-                cand, req.ip, req.port,
+                "All known ports failed for %s; re-scanning 49152-65535 for a "
+                "live RemotePairing port", req.ip,
             )
-
-            # Per-candidate timeout is shorter than the legacy 20s budget.
-            # Pair-verify against the wrong iPhone fails in well under a
-            # second; if a candidate hasn't responded in 8s the iPhone is
-            # almost certainly unreachable on the network and the next
-            # candidate would just hit the same wall, so the loop bails
-            # below on TimeoutError.
-            runner = TunnelRunner()
             try:
-                info = await runner.start(cand, req.ip, req.port, timeout=8.0)
-            except asyncio.TimeoutError as e:
-                last_error = e
-                _tunnel_logger.warning(
-                    "WiFi tunnel timed out for udid=%s; iPhone may be "
-                    "unreachable on the network — stopping further "
-                    "candidates",
-                    cand,
-                )
-                # Network-level timeout: trying more udids is unlikely to
-                # help. Surface the timeout error to the caller.
-                raise HTTPException(
-                    status_code=500,
-                    detail={"code": "tunnel_timeout", "message": "Tunnel 啟動逾時"},
-                ) from e
+                fresh = _filter_remotepairing_ports(await _scan_ports_for_ip(req.ip))
             except Exception as e:
-                last_error = e
-                _tunnel_logger.info(
-                    "WiFi tunnel candidate %s failed (%s); trying next",
-                    cand, type(e).__name__,
+                _tunnel_logger.warning("Re-scan of %s failed: %s", req.ip, e)
+                fresh = []
+            fresh = [p for p in fresh if p not in tried_ports]
+            if not fresh:
+                _tunnel_logger.warning(
+                    "Re-scan of %s found no untried ports", req.ip,
                 )
-                continue
+                break
+            _tunnel_logger.info("Re-scan found new port candidates: %s", fresh[:8])
+            port_candidates.extend(fresh[:8])
 
-            _tunnels[cand] = runner
-            _tunnel_watchdogs[cand] = asyncio.create_task(
-                _per_tunnel_watchdog(cand, runner)
-            )
-            _tunnel_logger.info("WiFi tunnel started for %s: %s", cand, info)
-            return {"status": "started", "udid": cand, **info}
-
-        # All candidates exhausted without a successful handshake.
+        # All (port, udid) combinations exhausted without a successful
+        # handshake.
+        if isinstance(last_error, asyncio.TimeoutError):
+            raise HTTPException(
+                status_code=500,
+                detail={"code": "tunnel_timeout", "message": "Tunnel 啟動逾時"},
+            ) from last_error
         msg = f"無法啟動 tunnel:{last_error}" if last_error else "無法啟動 tunnel"
         raise HTTPException(
             status_code=500,
@@ -1303,6 +1426,11 @@ async def wifi_tunnel_start_and_connect(req: WifiTunnelStartRequest):
             "name": info.name,
             "ios_version": info.ios_version,
             "connection_type": "Network",
+            # The port that actually worked, which is not always the one
+            # asked for: the start loop falls back to a live re-scan when
+            # the caller's remembered port has gone stale. Callers persist
+            # this so the next launch starts from a good guess.
+            "port": tunnel_result.get("port", req.port),
             "rsd_address": rsd_address,
             "rsd_port": rsd_port,
         }

@@ -26,7 +26,7 @@ interface DeviceStatusProps {
   isConnected: boolean;
   onScan: () => void | Promise<void>;
   onSelect: (id: string) => void;
-  onStartWifiTunnel?: (ip: string, port?: number) => Promise<any>;
+  onStartWifiTunnel?: (ip: string, port?: number, udid?: string, ports?: number[]) => Promise<any>;
   onStopTunnel?: (udid?: string) => Promise<void>;
   tunnelStatus?: TunnelStatus;
   tunnels?: TunnelInfo[];
@@ -1022,53 +1022,22 @@ const DeviceStatus: React.FC<DeviceStatusProps> = ({
                           setTunnelConnecting(true);
                           // iOS rebinds its RemotePairing port across reboots /
                           // network changes, so a single guessed (or stale
-                          // recent-list) port often times out while a different
-                          // open port is the live one (issue #33). Instead of
-                          // firing once at ports[0], try the entered port first
-                          // (fast path when it's still valid), then scan the
-                          // IANA dynamic range and try every open port until a
-                          // handshake actually succeeds.
-                          const tried = new Set<number>();
+                          // recent-list) port often fails while a different
+                          // open port is the live one (issue #33). One call is
+                          // enough now: the backend tries the entered port
+                          // first, then re-scans the dynamic range itself and
+                          // walks whatever it finds, reporting back the port
+                          // that actually handshook.
                           let connectedPort: number | null = null;
                           let lastErr: any = null;
-                          const tryPort = async (p: number): Promise<boolean> => {
-                            if (!Number.isFinite(p) || p <= 0 || tried.has(p)) return false;
-                            tried.add(p);
-                            try {
-                              await onStartWifiTunnel(ip, p);
-                              connectedPort = p;
-                              return true;
-                            } catch (err: any) {
-                              lastErr = err;
-                              return false;
-                            }
-                          };
                           try {
                             const entered = parseInt(tunnelPort);
-                            if (Number.isFinite(entered) && entered > 0) {
-                              await tryPort(entered);
-                            }
-                            if (connectedPort === null) {
-                              // Scan and walk every open port. Each wrong port
-                              // costs one backend handshake timeout (~8s), but
-                              // the scan usually returns only a handful.
-                              setPortScanning(true);
-                              let ports: number[] = [];
-                              try {
-                                const res = await wifiTunnelFindPort(ip);
-                                ports = res.ports || [];
-                              } catch (err: any) {
-                                lastErr = err;
-                              }
-                              setPortScanning(false);
-                              if (ports.length === 0 && tried.size === 0) {
-                                setTunnelError(t('wifi.port_scan_no_hit'));
-                                setTunnelConnecting(false);
-                                return;
-                              }
-                              for (const p of ports) {
-                                if (await tryPort(p)) break;
-                              }
+                            const primary = Number.isFinite(entered) && entered > 0 ? entered : 49152;
+                            try {
+                              const res = await onStartWifiTunnel(ip, primary);
+                              connectedPort = Number(res?.port) > 0 ? Number(res.port) : primary;
+                            } catch (err: any) {
+                              lastErr = err;
                             }
                             if (connectedPort !== null) {
                               setTunnelPort(String(connectedPort));

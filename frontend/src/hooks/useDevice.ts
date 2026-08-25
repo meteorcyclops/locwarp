@@ -18,6 +18,9 @@ export interface DeviceInfo {
   // failed, or device not yet connected). Used to decide whether to show
   // the "Reveal Developer Mode option" button.
   developer_mode_enabled?: boolean | null
+  // WiFi only: the RemotePairing port the tunnel actually handshook on,
+  // which can differ from the requested one when the backend re-scans.
+  port?: number
 }
 
 export interface WifiScanResult {
@@ -402,9 +405,13 @@ export function useDevice(subscribe?: WsSubscribe) {
   }, [subscribe])
 
   const startWifiTunnel = useCallback(
-    async (ip: string, port = 49152, udidHint?: string) => {
+    async (ip: string, port = 49152, udidHint?: string, portHints?: number[]) => {
       try {
-        const res = await wifiTunnelStartAndConnect(ip, port, udidHint)
+        const res = await wifiTunnelStartAndConnect(ip, port, udidHint, portHints)
+        // The backend re-scans and may land on a different port than the one
+        // we asked for (iOS re-picks RemotePairing on every boot). Remember
+        // what actually worked, not what we guessed.
+        const usedPort = Number(res.port) > 0 ? Number(res.port) : port
         const info: DeviceInfo = {
           udid: res.udid,
           name: res.name,
@@ -443,17 +450,18 @@ export function useDevice(subscribe?: WsSubscribe) {
           // an iPhone reconnects on a NEW DHCP-assigned IP. Without the
           // udid dedup we'd accumulate stale IPs for the same device.
           const filtered = baseList.filter((e) =>
-            e && !(e.ip === ip && e.port === port) && !(res.udid && e.udid === res.udid)
+            e && !(e.ip === ip && (e.port === port || e.port === usedPort))
+            && !(res.udid && e.udid === res.udid)
           )
           // Persist the device name too so the panel can keep showing the
           // real phone name after a WiFi drop instead of a raw UDID
           // (issue #33).
-          const next = [{ ip, port, udid: res.udid, name: res.name, lastUsed: Date.now() }, ...filtered].slice(0, 5)
+          const next = [{ ip, port: usedPort, udid: res.udid, name: res.name, lastUsed: Date.now() }, ...filtered].slice(0, 5)
           localStorage.setItem('locwarp.tunnel.savedips', JSON.stringify(next))
         } catch { /* storage disabled */ }
         // A successful connect clears any pending pin-retry for this device.
         clearPinRetry(res.udid)
-        return info
+        return { ...info, port: usedPort }
       } catch (err) {
         console.error('WiFi tunnel failed:', err)
         throw err
