@@ -45,7 +45,7 @@ const ERROR_I18N: Record<string, { zh: string; en: string }> = {
   ddi_mount_failed: { zh: 'DDI 掛載失敗,請確認 iPhone 已解鎖且開發者模式已開啟', en: 'DDI mount failed, make sure the iPhone is unlocked and Developer Mode is enabled' },
   usbmux_unavailable: { zh: '無法列出 USB 裝置,請確認驅動與 Apple Mobile Device Service 是否正常', en: 'Cannot list USB devices, check iTunes/Apple Mobile Device Service' },
   trust_failed: { zh: 'USB 信任失敗, 請在 iPhone 上點「信任」後再試', en: 'USB trust failed, tap Trust on the iPhone and retry' },
-  remote_pair_failed: { zh: 'RemotePairing 記錄重建失敗, 請以系統管理員身分重啟 LocWarp', en: 'RemotePairing record rebuild failed, restart LocWarp as Administrator' },
+  remote_pair_failed: { zh: 'RemotePairing 記錄重建失敗，請保持 iPhone 解鎖並查看詳細錯誤', en: 'RemotePairing record rebuild failed; keep the iPhone unlocked and check the detailed error' },
   device_lost: { zh: '裝置連線中斷(USB 拔除或 Tunnel 死亡),請重新插上 USB 後再操作', en: 'Device connection lost (USB unplugged or tunnel died), please reconnect USB and try again' },
   device_lost_tunnel_dead: {
     zh: 'WiFi 連線中斷,請確認手機 WiFi 與電腦同網段、解鎖手機後再試',

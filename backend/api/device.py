@@ -135,6 +135,32 @@ _tunnel_watchdogs: dict[str, asyncio.Task] = {}
 _tunnels_lock = asyncio.Lock()
 
 
+async def _open_repair_rsd(dm, udid, lockdown, proxy_cls, rsd_cls):
+    """Return an RSD connection suitable for rebuilding RemotePairing.
+
+    The normal macOS USB connection already owns pymobiledevice3's single
+    userspace tunnel. Starting a second CoreDeviceTunnelProxy in the same
+    process trips pmd-pytcp's singleton ARP worker, so reuse the live USB RSD
+    whenever one is available. The caller only owns/cleans up the fallback
+    tunnel returned when no live RSD exists.
+    """
+    active = dm._connections.get(udid)
+    active_rsd = getattr(active, "rsd", None) if active is not None else None
+    if active_rsd is not None:
+        # usbmuxd can report a physically attached phone as "Network" when
+        # both transports are visible. The process-wide userspace tunnel is
+        # what matters here, not that presentation label.
+        _tunnel_logger.info("Re-pair: reusing active RSD for %s", udid)
+        return active_rsd, None, None, False
+
+    proxy = await proxy_cls.create(lockdown)
+    tunnel_ctx = proxy.start_tcp_tunnel()
+    tunnel_result = await tunnel_ctx.__aenter__()
+    rsd = rsd_cls((tunnel_result.address, tunnel_result.port))
+    await rsd.connect()
+    return rsd, proxy, tunnel_ctx, True
+
+
 @router.post("/wifi/repair")
 async def wifi_repair():
     """Regenerate the RemotePairing pair record (~/.pymobiledevice3/) using a
@@ -222,19 +248,25 @@ async def wifi_repair():
         except Exception:
             _tunnel_logger.debug("Re-pair: could not check/remove stale pair record", exc_info=True)
 
+        dm = _dm()
         proxy = None
         tunnel_ctx = None
         rsd = None
+        owns_rsd = False
         tunnel_svc = None
         try:
-            # 1. Open a CoreDeviceTunnelProxy tunnel over USB.
-            proxy = await CoreDeviceTunnelProxy.create(lockdown)
-            tunnel_ctx = proxy.start_tcp_tunnel()
-            tunnel_result = await tunnel_ctx.__aenter__()
-
-            # 2. Construct an RSD on the tunnel.
-            rsd = RemoteServiceDiscoveryService((tunnel_result.address, tunnel_result.port))
-            await rsd.connect()
+            # 1. Reuse the active USB RSD on macOS. pmd-pytcp permits one
+            # userspace tunnel per process, so opening another here fails with
+            # "ARP Cache.start() called while a worker is still running".
+            # Fall back to a temporary tunnel only when the USB connection has
+            # not yet created an RSD.
+            rsd, proxy, tunnel_ctx, owns_rsd = await _open_repair_rsd(
+                dm,
+                udid,
+                lockdown,
+                CoreDeviceTunnelProxy,
+                RemoteServiceDiscoveryService,
+            )
 
             # 3. This is the step that actually triggers the Trust dialog
             #    (when no cached record) and persists the RemotePairing file
@@ -244,7 +276,7 @@ async def wifi_repair():
             _tunnel_logger.info(
                 "Re-pair: opening CoreDeviceTunnelService over RSD %s:%s — "
                 "Trust prompt should appear on iPhone...",
-                tunnel_result.address, tunnel_result.port,
+                rsd.service.address[0], rsd.service.address[1],
             )
             tunnel_svc = await create_core_device_tunnel_service_using_rsd(rsd, autopair=True)
             _tunnel_logger.info(
@@ -274,7 +306,7 @@ async def wifi_repair():
             # Close everything in reverse order; ignore errors.
             for closer in (
                 lambda: tunnel_svc and tunnel_svc.close(),
-                lambda: rsd and rsd.close(),
+                lambda: owns_rsd and rsd and rsd.close(),
                 lambda: tunnel_ctx and tunnel_ctx.__aexit__(None, None, None),
             ):
                 try:
