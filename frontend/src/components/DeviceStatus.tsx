@@ -4,7 +4,8 @@ import { wifiTunnelDiscover, wifiTunnelFindPort, wifiRepair, wifiKeepaliveGet, w
 import { useT } from '../i18n';
 import { reconcileConnectionHealth } from '../utils/connectionHealth';
 
-const MAX_TUNNEL_DEVICES = 3;
+// pymobiledevice3's root-free PyTCP stack is a process singleton on macOS.
+const MAX_TUNNEL_DEVICES = window.electronAPI?.platform === 'darwin' ? 1 : 3;
 
 interface Device {
   id: string;

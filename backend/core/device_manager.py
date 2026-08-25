@@ -118,6 +118,7 @@ class _ActiveConnection:
     tunnel_context: object = None  # async context manager for the tunnel
     userspace_tunnel: Optional[UserspaceRsdTunnel] = None
     rsd: Optional[RemoteServiceDiscoveryService] = None
+    owns_rsd: bool = True  # False when TunnelRunner owns a userspace RSD
     location_service: Optional[LocationService] = None
     usbmux_lockdown: object = None  # Original lockdown client (for legacy fallback on iOS 17+)
 
@@ -481,7 +482,7 @@ class DeviceManager:
                 logger.exception("Error closing DvtProvider for %s", udid)
 
         # Close RSD.
-        if conn.rsd is not None and conn.userspace_tunnel is None:
+        if conn.rsd is not None and conn.userspace_tunnel is None and conn.owns_rsd:
             try:
                 await conn.rsd.close()
             except Exception:
@@ -884,7 +885,11 @@ class DeviceManager:
     # ------------------------------------------------------------------
 
     async def connect_wifi_tunnel(
-        self, rsd_address: str, rsd_port: int
+        self,
+        rsd_address: str,
+        rsd_port: int,
+        *,
+        existing_rsd: RemoteServiceDiscoveryService | None = None,
     ) -> DeviceInfo:
         """Connect to a device via an existing WiFi tunnel.
 
@@ -896,35 +901,46 @@ class DeviceManager:
         """
         logger.info("Connecting via WiFi tunnel RSD at %s:%d", rsd_address, rsd_port)
 
-        import asyncio as _asyncio
-        rsd = None
-        last_exc: Exception | None = None
-        # TUN interface routes may take a few seconds to become reachable
-        # after the tunnel process reports ready, so retry with backoff.
-        for attempt in range(1, 11):
-            rsd = RemoteServiceDiscoveryService((rsd_address, rsd_port))
-            try:
-                await rsd.connect()
-                last_exc = None
-                break
-            except Exception as exc:
-                last_exc = exc
-                logger.warning(
-                    "RSD connect attempt %d/10 failed (%s): %s",
-                    attempt, exc.__class__.__name__, exc,
-                )
+        rsd = existing_rsd
+        owns_rsd = existing_rsd is None
+        if rsd is None:
+            import asyncio as _asyncio
+            last_exc: Exception | None = None
+            # Kernel TUN routes (Windows and the standalone endpoint) may
+            # take a few seconds to become reachable after the provider says
+            # ready, so retain the established retry path there.
+            for attempt in range(1, 11):
+                rsd = RemoteServiceDiscoveryService((rsd_address, rsd_port))
                 try:
-                    await rsd.close()
-                except (OSError, ConnectionError):
-                    pass
-                await _asyncio.sleep(min(0.5 * attempt, 2.0))
+                    await rsd.connect()
+                    last_exc = None
+                    break
+                except Exception as exc:
+                    last_exc = exc
+                    logger.warning(
+                        "RSD connect attempt %d/10 failed (%s): %s",
+                        attempt, exc.__class__.__name__, exc,
+                    )
+                    try:
+                        await rsd.close()
+                    except (OSError, ConnectionError):
+                        pass
+                    await _asyncio.sleep(min(0.5 * attempt, 2.0))
 
-        if last_exc is not None:
-            logger.error("Failed to connect to RSD at %s:%d after retries", rsd_address, rsd_port)
-            raise RuntimeError(
-                f"無法連線到 WiFi tunnel RSD ({rsd_address}:{rsd_port})。"
-                "請確認 WiFi tunnel 仍然活躍。"
-            ) from last_exc
+            if last_exc is not None:
+                logger.error("Failed to connect to RSD at %s:%d after retries", rsd_address, rsd_port)
+                raise RuntimeError(
+                    f"無法連線到 WiFi tunnel RSD ({rsd_address}:{rsd_port})。"
+                    "請確認 WiFi tunnel 仍然活躍。"
+                ) from last_exc
+        else:
+            logger.info(
+                "Adopting TunnelRunner's connected userspace RSD at %s:%d",
+                rsd_address,
+                rsd_port,
+            )
+
+        assert rsd is not None
 
         peer = rsd.peer_info or {}
         props = peer.get("Properties", {})
@@ -966,6 +982,7 @@ class DeviceManager:
             connection_type="Network",
             name=device_name,
             rsd=rsd,
+            owns_rsd=owns_rsd,
         )
 
         async with self._lock:

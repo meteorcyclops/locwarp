@@ -75,7 +75,22 @@ async def wifi_tunnel_connect(req: WifiTunnelConnectRequest):
             detail={"code": "max_devices_reached", "message": f"已連接最多 {MAX_DEVICES} 台裝置"},
         )
     try:
-        info = await dm.connect_wifi_tunnel(req.rsd_address, req.rsd_port)
+        runner = next(
+            (
+                item
+                for item in _tunnels.values()
+                if item.is_running()
+                and item.info
+                and item.info.get("rsd_address") == req.rsd_address
+                and item.info.get("rsd_port") == req.rsd_port
+            ),
+            None,
+        )
+        info = await dm.connect_wifi_tunnel(
+            req.rsd_address,
+            req.rsd_port,
+            existing_rsd=getattr(runner, "rsd", None),
+        )
         await app_state.create_engine_for_device(info.udid)
         try:
             from api.websocket import broadcast
@@ -116,6 +131,7 @@ async def wifi_tunnel_connect(req: WifiTunnelConnectRequest):
 
 import asyncio
 import logging
+import sys
 
 from core.wifi_tunnel import TunnelRunner
 
@@ -172,6 +188,26 @@ async def _open_repair_rsd(dm, udid, lockdown, proxy_cls, rsd_cls):
             _tunnel_logger.debug("Re-pair: failed to close fallback tunnel", exc_info=True)
         raise
     return rsd, proxy, tunnel_ctx, True
+
+
+async def _close_repair_tunnel_service(tunnel_svc, *, borrowed_rsd: bool) -> None:
+    """Close a temporary repair service without killing a borrowed live RSD.
+
+    pymobiledevice3's CoreDeviceTunnelService.close() also closes its parent
+    RSD. During repair that parent is usually DeviceManager's active USB RSD,
+    so calling the public close method would silently sever the working USB
+    connection. The dependency is pinned to 10.3.0; close only its owned
+    RemoteXPC service in the borrowed case.
+    """
+    if tunnel_svc is None:
+        return
+    if not borrowed_rsd:
+        await tunnel_svc.close()
+        return
+    inner_service = getattr(tunnel_svc, "_service", None)
+    if inner_service is not None:
+        await inner_service.close()
+        tunnel_svc._service = None
 
 
 @router.post("/wifi/repair")
@@ -318,8 +354,11 @@ async def wifi_repair():
         finally:
             # Close everything in reverse order; ignore errors.
             for closer in (
-                lambda: tunnel_svc and tunnel_svc.close(),
-                lambda: owns_rsd and rsd and rsd.close(),
+                lambda: _close_repair_tunnel_service(
+                    tunnel_svc,
+                    borrowed_rsd=not owns_rsd,
+                ),
+                lambda: owns_rsd and tunnel_svc is None and rsd and rsd.close(),
                 lambda: tunnel_ctx and tunnel_ctx.__aexit__(None, None, None),
             ):
                 try:
@@ -756,7 +795,11 @@ async def _attempt_tunnel_restart(
         # already exists, so the old (now-dead) RSD lockdown gets torn
         # down correctly.
         dm = _dm()
-        dev_info = await dm.connect_wifi_tunnel(new_rsd_address, new_rsd_port)
+        dev_info = await dm.connect_wifi_tunnel(
+            new_rsd_address,
+            new_rsd_port,
+            existing_rsd=new_runner.rsd,
+        )
 
         # Rebuild the sim engine bound to the new location service. The
         # old engine pointed at the dead RSD and would throw
@@ -829,8 +872,13 @@ async def _attempt_tunnel_restart(
             "Tunnel restart for %s started but post-setup failed; rolling back",
             udid,
         )
-        # Roll back the new runner we registered. Leave the old runner
-        # entry empty so the outer retry loop tries a fresh new one.
+        # Roll back any DM connection that already adopted the new RSD,
+        # then the new runner. Leave the registry empty so the outer retry
+        # loop can try a fresh owner.
+        try:
+            await _cleanup_wifi_connection_for(udid, caller="tunnel_restart_failed")
+        except Exception:
+            pass
         async with _tunnels_lock:
             if _tunnels.get(udid) is new_runner:
                 _tunnels.pop(udid, None)
@@ -1047,7 +1095,7 @@ def _build_tunnel_port_candidates(req: WifiTunnelStartRequest) -> list[int]:
 
 @router.post("/wifi/tunnel/start")
 async def wifi_tunnel_start(req: WifiTunnelStartRequest):
-    """Start an in-process WiFi tunnel for one device (requires admin).
+    """Start an in-process WiFi tunnel for one device.
 
     The runner is keyed in _tunnels by the actual udid once we resolve
     which paired iPhone is at the requested IP/port. Resolution iterates
@@ -1060,11 +1108,28 @@ async def wifi_tunnel_start(req: WifiTunnelStartRequest):
         # Active runners count toward the cap. Stale entries get pruned
         # so a crashed tunnel doesn't permanently block reconnect.
         live_count = sum(1 for r in _tunnels.values() if r.is_running())
-        if live_count >= MAX_DEVICES:
+        tunnel_limit = 1 if sys.platform == "darwin" else MAX_DEVICES
+        if live_count >= tunnel_limit:
             raise HTTPException(
                 status_code=409,
-                detail={"code": "max_devices_reached", "message": f"已連接最多 {MAX_DEVICES} 台裝置"},
+                detail={
+                    "code": "max_devices_reached",
+                    "message": f"此平台同時支援最多 {tunnel_limit} 條 WiFi 通道",
+                },
             )
+
+        if sys.platform == "darwin":
+            import pymobiledevice3.remote.userspace_tunnel as userspace_module
+
+            active_owner = getattr(userspace_module, "_active_tunnel", None)
+            if active_owner is not None and not isinstance(active_owner, TunnelRunner):
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": "usb_tunnel_active",
+                        "message": "請先拔除 USB,等待裝置顯示已斷線後再啟動 WiFi Tunnel",
+                    },
+                )
 
         candidates = _build_tunnel_udid_candidates(req)
         port_candidates = _build_tunnel_port_candidates(req)
@@ -1380,8 +1445,18 @@ async def wifi_tunnel_start_and_connect(req: WifiTunnelStartRequest):
             status_code=409,
             detail={"code": "max_devices_reached", "message": f"已連接最多 {MAX_DEVICES} 台裝置"},
         )
+    connected_udid: str | None = None
     try:
-        info = await dm.connect_wifi_tunnel(rsd_address, rsd_port)
+        runner = _tunnels.get(temp_key) if temp_key else None
+        existing_rsd = getattr(runner, "rsd", None)
+        info = await dm.connect_wifi_tunnel(
+            rsd_address,
+            rsd_port,
+            existing_rsd=existing_rsd,
+        )
+        connected_udid = info.udid
+        if runner is None or not runner.is_running() or _tunnels.get(temp_key) is not runner:
+            raise RuntimeError("WiFi tunnel was stopped while the device connection was being prepared")
         # v0.2.60: Drop the stale engine from the prior USB conn so
         # create_engine_for_device rebuilds a fresh one bound to the new
         # WiFi RSD. v0.2.57 made create_engine_for_device idempotent (to
@@ -1420,6 +1495,26 @@ async def wifi_tunnel_start_and_connect(req: WifiTunnelStartRequest):
                         _per_tunnel_watchdog(info.udid, runner)
                     )
 
+        # The explicit WiFi start path used to update only the HTTP caller.
+        # Any simulation runtime that had previously received
+        # device_disconnected therefore stayed red even though the new DVT
+        # engine was ready. Broadcast the same canonical event used by USB
+        # auto-connect so every frontend state store returns to idle/healthy.
+        try:
+            from api.websocket import broadcast
+
+            await broadcast("device_connected", {
+                "udid": info.udid,
+                "name": info.name,
+                "ios_version": info.ios_version,
+                "connection_type": "Network",
+            })
+        except Exception:
+            _tunnel_logger.exception(
+                "Failed to broadcast WiFi device_connected for %s",
+                info.udid,
+            )
+
         return {
             "status": "connected",
             "udid": info.udid,
@@ -1437,6 +1532,14 @@ async def wifi_tunnel_start_and_connect(req: WifiTunnelStartRequest):
     except Exception as e:
         # On failure, tear down the runner we just started so we don't
         # leave a zombie tunnel + leaked watchdog.
+        if connected_udid:
+            try:
+                await _cleanup_wifi_connection_for(
+                    connected_udid,
+                    caller="start_and_connect_failed",
+                )
+            except Exception:
+                pass
         if temp_key:
             try:
                 async with _tunnels_lock:

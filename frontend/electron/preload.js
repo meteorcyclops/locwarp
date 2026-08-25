@@ -1,6 +1,7 @@
 const { contextBridge, ipcRenderer, clipboard } = require('electron')
 
 contextBridge.exposeInMainWorld('electronAPI', {
+  platform: process.platform,
   locatePc: () => ipcRenderer.invoke('locate-pc'),
   getRenderMode: () => ipcRenderer.invoke('get-render-mode'),
   setRenderMode: (mode) => ipcRenderer.invoke('set-render-mode', mode),

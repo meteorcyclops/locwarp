@@ -1,7 +1,7 @@
 import unittest
 from types import SimpleNamespace
 
-from api.device import _open_repair_rsd
+from api.device import _close_repair_tunnel_service, _open_repair_rsd
 
 
 class _FailingProxy:
@@ -103,6 +103,31 @@ class WifiRepairRsdTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(_FailingRsd.closed)
         self.assertTrue(_FallbackProxy.context.closed)
+
+    async def test_closing_repair_service_preserves_borrowed_rsd(self):
+        class _InnerService:
+            def __init__(self):
+                self.closed = False
+
+            async def close(self):
+                self.closed = True
+
+        class _TunnelService:
+            def __init__(self):
+                self._service = _InnerService()
+                self.public_close_called = False
+
+            async def close(self):
+                self.public_close_called = True
+
+        service = _TunnelService()
+        inner = service._service
+
+        await _close_repair_tunnel_service(service, borrowed_rsd=True)
+
+        self.assertTrue(inner.closed)
+        self.assertIsNone(service._service)
+        self.assertFalse(service.public_close_called)
 
 
 if __name__ == "__main__":

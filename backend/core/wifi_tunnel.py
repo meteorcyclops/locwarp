@@ -9,6 +9,8 @@ release it via a stop event.
 
 import asyncio
 import logging
+import sys
+from contextlib import AsyncExitStack
 
 logger = logging.getLogger("wifi_tunnel")
 
@@ -18,6 +20,13 @@ class TunnelRunner:
 
     def __init__(self) -> None:
         self.info: dict | None = None
+        # On macOS this RSD is reachable only through the in-process PyTCP
+        # dial plane. DeviceManager must adopt this exact connected object.
+        self.rsd: object | None = None
+        # pymobiledevice3's userspace_stack_addr()/UserspaceUdp helpers read
+        # `_active_tunnel.tun`, so our singleton owner must expose the same
+        # surface as UserspaceRsdTunnel.
+        self.tun: object | None = None
         self.task: asyncio.Task | None = None
         self.lock = asyncio.Lock()
         self._stop: asyncio.Event = asyncio.Event()
@@ -51,6 +60,10 @@ class TunnelRunner:
             pass
 
     async def _run(self, udid: str, ip: str, port: int) -> None:
+        import pymobiledevice3.remote.tunnel_service as tunnel_service
+        from pymobiledevice3.remote.remote_service_discovery import (
+            RemoteServiceDiscoveryService,
+        )
         from pymobiledevice3.remote.tunnel_service import (
             create_core_device_tunnel_service_using_remotepairing,
         )
@@ -61,7 +74,44 @@ class TunnelRunner:
             )
             logger.info("RemotePairing connected (identifier=%s)", service.remote_identifier)
 
-            async with service.start_tcp_tunnel() as tunnel:
+            async with AsyncExitStack() as stack:
+                stack.push_async_callback(service.close)
+
+                userspace_module = None
+                if sys.platform == "darwin":
+                    # A kernel utun needs root on macOS. LocWarp deliberately
+                    # runs its backend as the signed-in user, so claim
+                    # pymobiledevice3's process-global root-free PyTCP stack.
+                    import pymobiledevice3.remote.userspace_tunnel as userspace_module
+                    from pymobiledevice3.remote.userspace_tunnel import UserspaceDialPlane
+
+                    active = getattr(userspace_module, "_active_tunnel", None)
+                    if active is not None and active is not self:
+                        raise RuntimeError(
+                            "USB userspace tunnel is still active; unplug the iPhone "
+                            "and wait for USB disconnect before starting WiFi"
+                        )
+                    userspace_module._active_tunnel = self
+                    userspace_module.USERSPACE_ACTIVE = True
+                    tunnel_service.USE_USERSPACE_TUNNEL = True
+
+                tunnel = await stack.enter_async_context(service.start_tcp_tunnel())
+
+                if userspace_module is not None:
+                    tun = tunnel.client.tun
+                    tun.set_peer(tunnel.address)
+                    self.tun = tun
+                    dial_plane = await stack.enter_async_context(
+                        UserspaceDialPlane(tun, tunnel.address)
+                    )
+                    rsd = RemoteServiceDiscoveryService(
+                        (tunnel.address, tunnel.port),
+                        open_connection=dial_plane.dial,
+                    )
+                    stack.push_async_callback(rsd.close)
+                    await rsd.connect()
+                    self.rsd = rsd
+
                 self.info = {
                     "rsd_address": tunnel.address,
                     "rsd_port": tunnel.port,
@@ -110,7 +160,20 @@ class TunnelRunner:
             self._ready.set()
             raise
         finally:
+            self.rsd = None
+            self.tun = None
             self.info = None
+            if sys.platform == "darwin":
+                try:
+                    import pymobiledevice3.remote.userspace_tunnel as userspace_module
+                    import pymobiledevice3.remote.tunnel_service as tunnel_service
+
+                    if getattr(userspace_module, "_active_tunnel", None) is self:
+                        userspace_module._active_tunnel = None
+                        userspace_module.USERSPACE_ACTIVE = False
+                        tunnel_service.USE_USERSPACE_TUNNEL = False
+                except Exception:
+                    logger.exception("Failed to release userspace tunnel claim")
 
     async def start(self, udid: str, ip: str, port: int, timeout: float = 20.0) -> dict:
         """Start the tunnel and wait until RSD info is ready.
@@ -122,6 +185,8 @@ class TunnelRunner:
         self._ready = asyncio.Event()
         self._error = None
         self.info = None
+        self.rsd = None
+        self.tun = None
         self.target_ip = ip
         self.target_port = port
         self.task = asyncio.create_task(self._run(udid, ip, port))
@@ -146,6 +211,8 @@ class TunnelRunner:
         if not self.is_running():
             self.task = None
             self.info = None
+            self.rsd = None
+            self.tun = None
             return
         self._stop.set()
         try:
@@ -161,3 +228,5 @@ class TunnelRunner:
             pass
         self.task = None
         self.info = None
+        self.rsd = None
+        self.tun = None

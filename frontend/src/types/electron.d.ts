@@ -28,6 +28,7 @@ export interface DesktopApiConfig {
 declare global {
   interface Window {
     electronAPI?: {
+      platform: NodeJS.Platform
       locatePc(): Promise<LocatePcResult>
       getRenderMode(): Promise<RenderModeInfo>
       setRenderMode(mode: RenderMode): Promise<{ ok: boolean }>
