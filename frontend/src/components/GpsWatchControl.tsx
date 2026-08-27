@@ -25,6 +25,9 @@ interface WatchStats {
 
 const GPS_QUEUE_POLICY_KEY = 'locwarp.gps_watch_queue_policy'
 const EMPTY_STATS: WatchStats = { queued: 0, succeeded: 0, dropped: 0, expired: 0, framesSkipped: 0 }
+// Keep two matching OCR frames as the safety gate. This interval only limits
+// how quickly a confirmed new coordinate may follow the previous one.
+const GPS_WATCH_MIN_INTERVAL_MS = 300
 
 const storedQueuePolicy = (): GpsQueuePolicy => {
   try {
@@ -38,7 +41,7 @@ const createDetector = (queuePolicy: GpsQueuePolicy) => new CoordinateAutoDetect
   stabilityFrames: 2,
   distanceMeters: 20,
   roundDecimals: 5,
-  minIntervalMs: 450,
+  minIntervalMs: GPS_WATCH_MIN_INTERVAL_MS,
   continuous: true,
   queuePolicy,
   queueMaxAgeMs: 3000,
@@ -87,7 +90,10 @@ const GpsWatchControl: React.FC<Props> = ({
   const stoppingRef = useRef(false)
   const sessionRef = useRef(0)
   const targetUdidRef = useRef<string | null>(null)
-  const ignoreStoppedRef = useRef(false)
+  // Teardown is complete only after Electron reports `stopped` or status
+  // reconciliation observes an idle helper. This replaces the old
+  // ignoreStopped flag, which could swallow the only final event after Esc.
+  const stopPendingRef = useRef(false)
   const queuePolicyRef = useRef<GpsQueuePolicy>(queuePolicy)
   const statsRef = useRef<WatchStats>(EMPTY_STATS)
   const lastPublishedStatusRef = useRef('')
@@ -127,17 +133,18 @@ const GpsWatchControl: React.FC<Props> = ({
 
   const stop = useCallback(async (reveal = false, resetUi = true) => {
     stoppingRef.current = true
-    ignoreStoppedRef.current = true
+    stopPendingRef.current = true
     sessionRef.current += 1
     detectorRef.current.reset()
     if (resetUi) {
       setPhase('stopping')
-      setDetail('正在停止 GPS 畫面監看…')
+      setDetail('GPS 畫面監看已停止，正在釋放擷取資源…')
     }
     try {
       await window.electronAPI?.gpsWatch?.stop()
       if (reveal) await window.electronAPI?.gpsWatch?.showMain()
     } finally {
+      stopPendingRef.current = false
       stoppingRef.current = false
       if (resetUi) {
         setPhase('idle')
@@ -157,10 +164,11 @@ const GpsWatchControl: React.FC<Props> = ({
         // trailing helper frames and an in-flight teleport acknowledgement
         // cannot revive the watcher after the user has left the mode.
         stoppingRef.current = true
+        stopPendingRef.current = true
         sessionRef.current += 1
         detectorRef.current.reset()
         setPhase('stopping')
-        setDetail('正在停止 GPS 畫面監看…')
+        setDetail('GPS 畫面監看已停止，正在釋放擷取資源…')
         return
       }
       if (event.event === 'permission') {
@@ -268,22 +276,73 @@ const GpsWatchControl: React.FC<Props> = ({
         return
       }
       if (event.event === 'stopped') {
-        if (ignoreStoppedRef.current) return
+        stopPendingRef.current = false
         stoppingRef.current = false
         setPhase('idle')
-        setDetail(event.reason === 'hotkey' ? '已由快捷鍵停止 GPS 監看' : 'GPS 畫面監看已停止')
+        setDetail(event.reason === 'escape' || event.reason === 'hotkey'
+          ? '已由快捷鍵停止 GPS 監看'
+          : 'GPS 畫面監看已停止')
       }
     })
   }, [onShowToast, publishStats, stop])
 
   useEffect(() => {
-    void window.electronAPI?.gpsWatch?.status().then((status) => {
+    const gpsWatch = window.electronAPI?.gpsWatch
+    if (!gpsWatch) return
+    let cancelled = false
+    void gpsWatch.status().then((status) => {
+      if (cancelled) return
       if (status.state === 'watching' || status.state === 'starting') {
         setPhase(status.state === 'watching' ? 'watching' : 'starting')
         setDetail(status.state === 'watching' ? 'GPS 畫面監看中' : '正在啟動 GPS 畫面監看…')
+      } else if (status.state === 'stopping') {
+        stopPendingRef.current = true
+        stoppingRef.current = true
+        setPhase('stopping')
+        setDetail('GPS 畫面監看已停止，正在釋放擷取資源…')
       }
-    })
+    }).catch(() => {})
+    return () => { cancelled = true }
   }, [])
+
+  // Electron normally emits `stopped`, but reconcile against the authoritative
+  // process state as a fallback. This covers the observed case where the
+  // helper is already gone but the renderer missed the final IPC event.
+  useEffect(() => {
+    if (phase !== 'stopping') return
+    const gpsWatch = window.electronAPI?.gpsWatch
+    if (!gpsWatch) return
+    let cancelled = false
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const startedAt = Date.now()
+    const poll = async () => {
+      let state: string | undefined
+      try {
+        state = (await gpsWatch.status()).state
+      } catch {
+        // Keep trying across a transient renderer/main-process IPC failure.
+      }
+      if (cancelled) return
+      if (state === 'idle') {
+        stopPendingRef.current = false
+        stoppingRef.current = false
+        setPhase('idle')
+        setDetail('GPS 畫面監看已停止')
+        return
+      }
+      // The main process has a bounded helper-stop path. Keep this last poll
+      // window slightly longer than that path, without claiming idle while a
+      // live helper is still reported as stopping.
+      if (Date.now() - startedAt < 6000) {
+        timer = setTimeout(() => { void poll() }, 150)
+      }
+    }
+    void poll()
+    return () => {
+      cancelled = true
+      if (timer) clearTimeout(timer)
+    }
+  }, [phase])
 
   useEffect(() => {
     const isActive = phase === 'selecting'
@@ -331,7 +390,7 @@ const GpsWatchControl: React.FC<Props> = ({
     }
 
     stoppingRef.current = false
-    ignoreStoppedRef.current = false
+    stopPendingRef.current = false
     const session = sessionRef.current + 1
     sessionRef.current = session
     targetUdidRef.current = targetUdid

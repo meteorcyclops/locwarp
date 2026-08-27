@@ -677,7 +677,12 @@ private final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegat
                 )
                 let streamConfiguration = SCStreamConfiguration()
                 streamConfiguration.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(resolved.configuration.fps.rounded()))
-                streamConfiguration.queueDepth = 3
+                // Vision runs off the capture callback and the mailbox keeps
+                // only the newest waiting frame. A shallow ScreenCaptureKit
+                // queue prevents old buffers from adding latency before they
+                // reach that mailbox, while still allowing one callback to be
+                // in flight during an OCR pass.
+                streamConfiguration.queueDepth = 2
                 streamConfiguration.showsCursor = false
                 streamConfiguration.pixelFormat = kCVPixelFormatType_32BGRA
                 streamConfiguration.width = resolved.pixelWidth

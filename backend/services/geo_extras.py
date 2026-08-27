@@ -167,7 +167,7 @@ _OVERPASS_HEADERS = {
     # Overpass enforces User-Agent identification; some mirrors return 406
     # to anonymous clients (the python-httpx default UA gets caught up in
     # bot filters). Mirror what other OSM clients send.
-    "User-Agent": "LocWarp-koxuan/0.2.193-kx.10 (https://github.com/meteorcyclops/locwarp)",
+    "User-Agent": "LocWarp-koxuan/0.2.193-kx.11 (https://github.com/meteorcyclops/locwarp)",
     "Accept": "application/json",
 }
 

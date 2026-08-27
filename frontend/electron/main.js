@@ -240,6 +240,8 @@ let gpsWatchStdoutBuffer = ''
 let gpsWatchStopTimer = null
 let gpsWatchForceKillTimer = null
 let gpsWatchStartupTimer = null
+let gpsWatchStopPromise = null
+let gpsWatchStopReason = null
 let gpsWatchBorderStatus = {
   mode: 'latest',
   queued: 0,
@@ -386,37 +388,63 @@ async function stopGpsWatch(reason = 'user') {
   if (gpsWatchSelectionFinish) {
     finishGpsWatchSelection({ ok: false, code: 'cancelled_by_stop', reason })
   }
-  const child = gpsWatchProc
-  if (!child) {
-    clearGpsWatchProcessState()
-    return { ok: true, state: 'idle' }
-  }
-  if (gpsWatchState === 'stopping') {
-    await waitForChildExit(child, 3500)
-    return { ok: true, state: child === gpsWatchProc ? 'stopping' : 'idle' }
-  }
-  gpsWatchState = 'stopping'
-  writeGpsWatchCommand(child, { command: 'shutdown' })
-  gpsWatchStopTimer = setTimeout(() => {
-    try { child.kill('SIGTERM') } catch {}
-  }, 1200)
-  gpsWatchForceKillTimer = setTimeout(() => {
-    if (child === gpsWatchProc) {
-      try { child.kill('SIGKILL') } catch {}
+
+  // A global shortcut, a renderer effect, and an app shutdown can all ask for
+  // the same stop at nearly the same time. Share one bounded operation so a
+  // second caller cannot observe a half-cleared process and leave its UI in
+  // `stopping` without receiving the final lifecycle event.
+  if (gpsWatchStopPromise) return gpsWatchStopPromise
+
+  const operation = (async () => {
+    const child = gpsWatchProc
+    if (!child) {
+      clearGpsWatchProcessState()
+      sendGpsWatchEvent({ event: 'stopped', reason })
+      return { ok: true, state: 'idle' }
     }
-  }, 3000)
-  closeGpsWatchBorder()
-  sendGpsWatchEvent({ event: 'stopping', reason })
-  const exited = await waitForChildExit(child, 3500)
-  if (!exited && child === gpsWatchProc) {
-    try { child.kill('SIGKILL') } catch {}
-    await waitForChildExit(child, 1500)
-  }
-  if (child === gpsWatchProc) {
-    clearGpsWatchProcessState()
-    sendGpsWatchEvent({ event: 'stopped', reason: 'forced_shutdown' })
-  }
-  return { ok: true, state: 'idle' }
+    if (gpsWatchState === 'stopping') {
+      const exited = await waitForChildExit(child, 3500)
+      if (!exited && child === gpsWatchProc) {
+        try { child.kill('SIGKILL') } catch {}
+        await waitForChildExit(child, 1500)
+      }
+      if (child === gpsWatchProc) {
+        clearGpsWatchProcessState()
+        sendGpsWatchEvent({ event: 'stopped', reason: 'forced_shutdown' })
+      }
+      return { ok: true, state: 'idle' }
+    }
+    gpsWatchState = 'stopping'
+    gpsWatchStopReason = reason
+    writeGpsWatchCommand(child, { command: 'shutdown' })
+    gpsWatchStopTimer = setTimeout(() => {
+      try { child.kill('SIGTERM') } catch {}
+    }, 1200)
+    gpsWatchForceKillTimer = setTimeout(() => {
+      if (child === gpsWatchProc) {
+        try { child.kill('SIGKILL') } catch {}
+      }
+    }, 3000)
+    closeGpsWatchBorder()
+    sendGpsWatchEvent({ event: 'stopping', reason })
+    const exited = await waitForChildExit(child, 3500)
+    if (!exited && child === gpsWatchProc) {
+      try { child.kill('SIGKILL') } catch {}
+      await waitForChildExit(child, 1500)
+    }
+    if (child === gpsWatchProc) {
+      clearGpsWatchProcessState()
+      sendGpsWatchEvent({ event: 'stopped', reason: 'forced_shutdown' })
+    }
+    return { ok: true, state: 'idle' }
+  })()
+
+  const trackedOperation = operation.finally(() => {
+    if (gpsWatchStopPromise === trackedOperation) gpsWatchStopPromise = null
+    gpsWatchStopReason = null
+  })
+  gpsWatchStopPromise = trackedOperation
+  return trackedOperation
 }
 
 function handleGpsWatchLine(line, child) {
@@ -444,7 +472,10 @@ function handleGpsWatchLine(line, child) {
         units: 'points',
         scale: region.scaleFactor,
       },
-      fps: 5,
+      // The helper caps this at 8 fps and drops stale frames when Vision is
+      // busy. A faster cadence reduces the two-frame confirmation delay while
+      // preserving the detector's multi-frame safety gate.
+      fps: 8,
       recognitionLevel: 'accurate',
     })) {
       gpsWatchState = 'error'
@@ -516,14 +547,16 @@ function startGpsWatch(region) {
     if (child !== gpsWatchProc) return
     sendGpsWatchEvent({ event: 'error', code: 'helper_spawn_failed', message: error.message })
     clearGpsWatchProcessState()
+    sendGpsWatchEvent({ event: 'stopped', reason: 'helper_spawn_failed' })
   })
   child.on('exit', (code, signal) => {
     if (child !== gpsWatchProc) return
     const wasStopping = gpsWatchState === 'stopping'
+    const stopReason = gpsWatchStopReason
     clearGpsWatchProcessState()
     sendGpsWatchEvent({
       event: 'stopped',
-      reason: wasStopping ? 'user' : 'helper_exit',
+      reason: wasStopping ? (stopReason || 'user') : 'helper_exit',
       code,
       signal,
     })
