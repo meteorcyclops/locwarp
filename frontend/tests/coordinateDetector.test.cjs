@@ -99,6 +99,87 @@ test('multiple simultaneous unseen coordinates are reported as ambiguous', async
   assert.equal(result.newCandidates.length, 2);
 });
 
+test('continuous mode drains multiple stable coordinates without entering ambiguous state', async () => {
+  const { CoordinateAutoDetector } = await moduleUnderTest;
+  const detector = new CoordinateAutoDetector({ continuous: true, minIntervalMs: 0 });
+  detector.observe('25.033,121.565', 0);
+
+  const firstPending = detector.observe('25.034,121.566\n25.035,121.567', 10);
+  assert.equal(firstPending.phase, 'pending');
+  assert.deepEqual(firstPending.coordinate, { lat: 25.034, lng: 121.566 });
+  const firstReady = detector.observe('25.034,121.566\n25.035,121.567', 20);
+  assert.equal(firstReady.phase, 'ready');
+  assert.deepEqual(firstReady.coordinate, { lat: 25.034, lng: 121.566 });
+  assert.equal(detector.markSucceeded(firstReady.attemptId, 21), true);
+
+  const secondReady = detector.observe('25.034,121.566\n25.035,121.567', 30);
+  assert.equal(secondReady.phase, 'ready');
+  assert.deepEqual(secondReady.coordinate, { lat: 25.035, lng: 121.567 });
+});
+
+test('continuous mode queues a short-lived candidate while another teleport is in flight', async () => {
+  const { CoordinateAutoDetector } = await moduleUnderTest;
+  const detector = new CoordinateAutoDetector({ continuous: true, minIntervalMs: 0 });
+  detector.observe('25.033,121.565', 0);
+
+  const first = detector.observe('25.034,121.566\n25.035,121.567', 10);
+  assert.equal(first.phase, 'pending');
+  const ready = detector.observe('25.034,121.566\n25.035,121.567', 20);
+  assert.equal(ready.ready, true);
+  assert.deepEqual(ready.coordinate, { lat: 25.034, lng: 121.566 });
+
+  // The second coordinate is still visible for only one more frame. It is
+  // already stable, so it must remain queued even when it disappears later.
+  detector.observe('25.034,121.566\n25.035,121.567', 30);
+  detector.observe('25.034,121.566', 40);
+  assert.equal(detector.getSnapshot().queued.length, 1);
+  assert.equal(detector.markSucceeded(ready.attemptId, 50), true);
+
+  const queuedReady = detector.observe('25.034,121.566', 60);
+  assert.equal(queuedReady.ready, true);
+  assert.deepEqual(queuedReady.coordinate, { lat: 25.035, lng: 121.567 });
+});
+
+test('continuous FIFO is bounded and reports discarded oldest candidates', async () => {
+  const { CoordinateAutoDetector, CONTINUOUS_QUEUE_LIMIT } = await moduleUnderTest;
+  const detector = new CoordinateAutoDetector({ continuous: true, minIntervalMs: 0 });
+  detector.observe('25.033,121.565', 0);
+  const points = Array.from({ length: CONTINUOUS_QUEUE_LIMIT + 6 }, (_, index) =>
+    `${(30 + index * 0.01).toFixed(5)},${(120 + index * 0.01).toFixed(5)}`,
+  ).join('\n');
+  detector.observe(points, 10);
+  const first = detector.observe(points, 20);
+  assert.equal(first.ready, true);
+  assert.equal(first.droppedCount, 6);
+  assert.equal(detector.getSnapshot().queued.length, CONTINUOUS_QUEUE_LIMIT - 1);
+  assert.equal(detector.getSnapshot().droppedCount, 6);
+});
+
+test('continuous reset invalidates in-flight work and clears the FIFO', async () => {
+  const { CoordinateAutoDetector } = await moduleUnderTest;
+  const detector = new CoordinateAutoDetector({ continuous: true, minIntervalMs: 0 });
+  detector.observe('25.033,121.565', 0);
+  detector.observe('25.034,121.566\n25.035,121.567', 10);
+  const ready = detector.observe('25.034,121.566\n25.035,121.567', 20);
+  assert.equal(ready.ready, true);
+  detector.observe('25.034,121.566\n25.035,121.567', 30);
+  assert.equal(detector.getSnapshot().queued.length, 1);
+
+  detector.reset();
+  assert.deepEqual(detector.getSnapshot(), {
+    initialized: false,
+    seen: [],
+    pending: undefined,
+    pendingFrames: 0,
+    inFlight: undefined,
+    queued: [],
+    droppedCount: 0,
+    lastAttemptAtMs: undefined,
+    nextAllowedAtMs: undefined,
+  });
+  assert.equal(detector.markSucceeded(ready.attemptId, 40), false);
+});
+
 test('structured OCR candidates require a conservative confidence threshold when enabled', async () => {
   const { CoordinateAutoDetector, parseAllCoordinates } = await moduleUnderTest;
   const baseline = { latitude: 25.033, longitude: 121.565, confidence: 0.99, text: '25.033,121.565' };

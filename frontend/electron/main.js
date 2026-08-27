@@ -295,7 +295,7 @@ function showGpsWatchBorder(region) {
     html,body{margin:0;width:100%;height:100%;overflow:hidden;background:transparent}
     body{box-sizing:border-box;border:2px solid #4ecdc4;border-radius:8px;box-shadow:inset 0 0 0 1px rgba(255,255,255,.2),0 0 14px rgba(78,205,196,.55)}
     span{position:absolute;top:5px;left:7px;padding:3px 7px;border-radius:6px;background:rgba(8,18,25,.88);color:#dffefa;font:600 10px -apple-system,BlinkMacSystemFont,sans-serif;white-space:nowrap}
-  </style><span>LocWarp GPS 掃描中 · ⌥⇧G 停止</span>`
+  </style><span>LocWarp GPS 掃描中 · Esc 停止</span>`
   gpsWatchBorderWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`)
   gpsWatchBorderWindow.showInactive()
 }
@@ -313,6 +313,7 @@ function clearGpsWatchProcessState() {
   gpsWatchRegion = null
   closeGpsWatchBorder()
   globalShortcut.unregister('Alt+Shift+G')
+  globalShortcut.unregister('Escape')
 }
 
 function writeGpsWatchCommand(child, command) {
@@ -491,6 +492,22 @@ function startGpsWatch(region) {
     }
     void stopPromise
   })
+  globalShortcut.unregister('Escape')
+  const escapeRegistered = globalShortcut.register('Escape', () => {
+    const stopPromise = stopGpsWatch('escape')
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.show()
+      mainWindow.focus()
+    }
+    void stopPromise
+  })
+  if (!escapeRegistered) {
+    sendGpsWatchEvent({
+      event: 'warning',
+      code: 'escape_shortcut_unavailable',
+      message: 'Esc 快捷鍵目前無法註冊；可按停止按鈕或使用 ⌥⇧G 離開 GPS 掃描',
+    })
+  }
   return { ok: true, state: 'starting', region }
 }
 
@@ -922,7 +939,7 @@ async function createWindow() {
         const u = new URL(details.url)
         if (OSM_HOSTS.includes(u.hostname)) {
           details.requestHeaders['User-Agent'] =
-            'LocWarp-koxuan/0.2.193-kx.6 (+https://github.com/meteorcyclops/locwarp)'
+            'LocWarp-koxuan/0.2.193-kx.7 (+https://github.com/meteorcyclops/locwarp)'
           details.requestHeaders['Referer'] = 'https://github.com/meteorcyclops/locwarp'
         }
       } catch {}

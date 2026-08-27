@@ -34,6 +34,7 @@ export const DEFAULT_DEDUPE_DISTANCE_METERS = 20
 export const DEFAULT_STABILITY_FRAMES = 2
 export const DEFAULT_MIN_INTERVAL_MS = 500
 export const DEFAULT_MIN_CONFIDENCE = 0.9
+export const CONTINUOUS_QUEUE_LIMIT = 24
 
 /** True only for finite GPS coordinates in the usual lat/lng order. */
 export function isValidCoordinate(coordinate: Coordinate | null | undefined): coordinate is Coordinate {
@@ -268,6 +269,8 @@ export const parseGpsCandidates = parseAllCoordinates
 export interface CoordinateDetectorOptions extends CoordinateDedupeOptions, CoordinateConfidenceOptions {
   /** Number of consecutive matching frames needed before an attempt. */
   stabilityFrames?: number
+  /** Process the first stable coordinate from a multi-coordinate frame. */
+  continuous?: boolean
   /** Minimum time between emitted attempts, regardless of success/failure. */
   minIntervalMs?: number
   /** Optional clock used only when `observe` receives no timestamp. */
@@ -304,7 +307,9 @@ export interface CoordinateDetectorFrameResult {
   nextAllowedAtMs?: number
   /** Human-readable-free machine reason for adapters/logging. */
   reason?: 'initial_baseline' | 'no_candidates' | 'already_seen' | 'candidate_pending'
-    | 'multiple_new_candidates' | 'min_interval' | 'awaiting_result'
+    | 'multiple_new_candidates' | 'min_interval' | 'awaiting_result' | 'queue_overflow'
+  /** Number of candidates discarded because the continuous FIFO was full. */
+  droppedCount: number
 }
 
 export interface CoordinateDetectorSnapshot {
@@ -313,6 +318,8 @@ export interface CoordinateDetectorSnapshot {
   pending?: Coordinate
   pendingFrames: number
   inFlight?: { attemptId: number; coordinate: Coordinate }
+  queued: Coordinate[]
+  droppedCount: number
   lastAttemptAtMs?: number
   nextAllowedAtMs?: number
 }
@@ -332,7 +339,7 @@ function cloneCoordinate(coordinate: Coordinate): Coordinate {
  * storage.  Those effects stay in the UI/Electron integration layer.
  */
 export class CoordinateAutoDetector {
-  readonly options: Required<Pick<CoordinateDetectorOptions, 'stabilityFrames' | 'roundDecimals' | 'distanceMeters' | 'minIntervalMs' | 'minConfidence' | 'requireConfidence'>>
+  readonly options: Required<Pick<CoordinateDetectorOptions, 'stabilityFrames' | 'roundDecimals' | 'distanceMeters' | 'minIntervalMs' | 'minConfidence' | 'requireConfidence' | 'continuous'>>
 
   private readonly clock: () => number
   private initialized = false
@@ -340,6 +347,10 @@ export class CoordinateAutoDetector {
   private pending?: Coordinate
   private pendingFrames = 0
   private inFlight?: { attemptId: number; coordinate: Coordinate }
+  private continuousPending: Array<{ coordinate: Coordinate; frames: number; lastFrame: number }> = []
+  private continuousQueue: Coordinate[] = []
+  private continuousFrame = 0
+  private continuousDropped = 0
   private nextAttemptId = 1
   private lastAttemptAtMs?: number
   private nextAllowedAtMs = Number.NEGATIVE_INFINITY
@@ -369,6 +380,7 @@ export class CoordinateAutoDetector {
       minIntervalMs,
       minConfidence,
       requireConfidence: options.requireConfidence ?? false,
+      continuous: options.continuous ?? false,
     }
     this.clock = options.clock ?? (() => Date.now())
   }
@@ -398,6 +410,10 @@ export class CoordinateAutoDetector {
       })
     }
 
+    if (this.options.continuous) {
+      return this.observeContinuous(candidates, now)
+    }
+
     if (this.inFlight) {
       const current = this.inFlight.coordinate
       const matching = candidates.find((candidate) => this.isSame(candidate, current))
@@ -410,7 +426,7 @@ export class CoordinateAutoDetector {
     }
 
     const newCandidates = this.newCandidates(candidates)
-    if (newCandidates.length > 1) {
+    if (newCandidates.length > 1 && !this.options.continuous) {
       this.clearPending()
       return this.result('ambiguous', 'ambiguous', candidates, newCandidates, {
         reason: 'multiple_new_candidates',
@@ -482,7 +498,12 @@ export class CoordinateAutoDetector {
     if (!flight) return false
     this.seen = this.mergeSeen(this.seen, flight.coordinate)
     this.inFlight = undefined
-    this.clearPending()
+    if (this.options.continuous) {
+      this.pending = undefined
+      this.pendingFrames = 0
+    } else {
+      this.clearPending()
+    }
     // Keep the attempt interval anchored to the emission timestamp.  `now` is
     // intentionally consumed/validated so callers can pass the same clock to
     // success and failure without surprising timestamp errors.
@@ -508,6 +529,15 @@ export class CoordinateAutoDetector {
     const flight = this.matchFlight(attempt)
     if (!flight) return false
     this.inFlight = undefined
+    if (this.options.continuous) {
+      if (!this.containsCoordinate(this.continuousQueue, flight.coordinate)) {
+        if (this.continuousQueue.length >= CONTINUOUS_QUEUE_LIMIT) {
+          this.continuousQueue.shift()
+          this.continuousDropped += 1
+        }
+        this.continuousQueue.unshift(cloneCoordinate(flight.coordinate))
+      }
+    }
     // Keep the already-established stability count.  Once the interval has
     // elapsed, the next matching frame can retry without a needless second
     // visual confirmation cycle; a changed/disappeared candidate resets it.
@@ -541,6 +571,10 @@ export class CoordinateAutoDetector {
     this.seen = []
     this.clearPending()
     this.inFlight = undefined
+    this.continuousPending = []
+    this.continuousQueue = []
+    this.continuousFrame = 0
+    this.continuousDropped = 0
     // Keep attempt IDs monotonic across sessions so a late promise from the
     // previous session cannot accidentally acknowledge a new attempt #1.
     this.lastAttemptAtMs = undefined
@@ -560,6 +594,8 @@ export class CoordinateAutoDetector {
       inFlight: this.inFlight
         ? { attemptId: this.inFlight.attemptId, coordinate: cloneCoordinate(this.inFlight.coordinate) }
         : undefined,
+      queued: this.continuousQueue.map(cloneCoordinate),
+      droppedCount: this.continuousDropped,
       lastAttemptAtMs: this.lastAttemptAtMs,
       nextAllowedAtMs: Number.isFinite(this.nextAllowedAtMs) ? this.nextAllowedAtMs : undefined,
     }
@@ -568,6 +604,111 @@ export class CoordinateAutoDetector {
   private clearPending(): void {
     this.pending = undefined
     this.pendingFrames = 0
+    this.continuousPending = []
+    this.continuousQueue = []
+  }
+
+  /**
+   * Continuous sessions keep a bounded FIFO while one teleport is in flight.
+   * Each coordinate gets its own consecutive-frame counter, so a short-lived
+   * second/third candidate is not lost just because the first API call is
+   * still completing.
+   */
+  private observeContinuous(
+    candidates: readonly Coordinate[],
+    now: number,
+  ): CoordinateDetectorFrameResult {
+    const frame = ++this.continuousFrame
+
+    for (let index = this.continuousPending.length - 1; index >= 0; index -= 1) {
+      const entry = this.continuousPending[index]
+      if (!candidates.some((candidate) => this.isSame(candidate, entry.coordinate))) {
+        this.continuousPending.splice(index, 1)
+      }
+    }
+
+    for (const candidate of candidates) {
+      if (this.seen.some((existing) => this.isSame(existing, candidate))) continue
+      if (this.inFlight && this.isSame(this.inFlight.coordinate, candidate)) continue
+      if (this.containsCoordinate(this.continuousQueue, candidate)) continue
+
+      const existingIndex = this.continuousPending.findIndex((entry) => this.isSame(entry.coordinate, candidate))
+      if (existingIndex < 0) {
+        this.continuousPending.push({ coordinate: cloneCoordinate(candidate), frames: 1, lastFrame: frame })
+        continue
+      }
+
+      const entry = this.continuousPending[existingIndex]
+      entry.frames = entry.lastFrame === frame - 1 ? entry.frames + 1 : 1
+      entry.lastFrame = frame
+      if (entry.frames < this.options.stabilityFrames) continue
+
+      this.continuousPending.splice(existingIndex, 1)
+      if (this.containsCoordinate(this.continuousQueue, entry.coordinate)) continue
+      if (this.continuousQueue.length >= CONTINUOUS_QUEUE_LIMIT) {
+        this.continuousQueue.shift()
+        this.continuousDropped += 1
+      }
+      this.continuousQueue.push(cloneCoordinate(entry.coordinate))
+    }
+
+    const newCandidates = dedupeCoordinates([
+      ...this.newCandidates(candidates),
+      ...this.continuousPending.map((entry) => entry.coordinate),
+      ...this.continuousQueue,
+    ], this.options)
+    const dropped = this.continuousDropped > 0 ? { reason: 'queue_overflow' as const } : {}
+
+    if (this.inFlight) {
+      return this.result('none', 'awaiting_result', candidates, newCandidates, {
+        coordinate: this.inFlight.coordinate,
+        stableFrames: this.pendingFrames,
+        attemptId: this.inFlight.attemptId,
+        ...dropped,
+      })
+    }
+
+    if (this.continuousQueue.length > 0) {
+      const next = this.continuousQueue[0]
+      if (now < this.nextAllowedAtMs) {
+        return this.result('throttled', 'throttled', candidates, newCandidates, {
+          coordinate: next,
+          stableFrames: this.options.stabilityFrames,
+          nextAllowedAtMs: this.nextAllowedAtMs,
+          ...dropped,
+        })
+      }
+      const coordinate = this.continuousQueue.shift()!
+      const attemptId = this.nextAttemptId++
+      this.inFlight = { attemptId, coordinate: cloneCoordinate(coordinate) }
+      this.lastAttemptAtMs = now
+      this.nextAllowedAtMs = now + this.options.minIntervalMs
+      return this.result('candidate', 'ready', candidates, newCandidates, {
+        coordinate,
+        stableFrames: this.options.stabilityFrames,
+        attemptId,
+        ...dropped,
+      })
+    }
+
+    if (this.continuousPending.length > 0) {
+      const pending = this.continuousPending[0]
+      this.pending = cloneCoordinate(pending.coordinate)
+      this.pendingFrames = pending.frames
+      return this.result('none', 'pending', candidates, newCandidates, {
+        coordinate: pending.coordinate,
+        stableFrames: pending.frames,
+        ...dropped,
+      })
+    }
+
+    this.pending = undefined
+    this.pendingFrames = 0
+    return this.result('none', candidates.length === 0 ? 'empty' : 'seen', candidates, newCandidates, dropped)
+  }
+
+  private containsCoordinate(coordinates: readonly Coordinate[], target: Coordinate): boolean {
+    return coordinates.some((coordinate) => this.isSame(coordinate, target))
   }
 
   private isSame(a: Coordinate, b: Coordinate): boolean {
@@ -608,6 +749,7 @@ export class CoordinateAutoDetector {
       newCandidates: newCandidates.map(cloneCoordinate),
       stableFrames: details.stableFrames ?? this.pendingFrames,
       ready: phase === 'ready',
+      droppedCount: this.continuousDropped,
       ...(details.coordinate ? { coordinate: cloneCoordinate(details.coordinate) } : {}),
       ...(details.attemptId !== undefined ? { attemptId: details.attemptId } : {}),
       ...(details.nextAllowedAtMs !== undefined ? { nextAllowedAtMs: details.nextAllowedAtMs } : {}),

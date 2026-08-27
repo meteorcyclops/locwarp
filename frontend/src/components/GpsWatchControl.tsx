@@ -46,7 +46,8 @@ const GpsWatchControl: React.FC<Props> = ({
     stabilityFrames: 2,
     distanceMeters: 20,
     roundDecimals: 5,
-    minIntervalMs: 900,
+    minIntervalMs: 450,
+    continuous: true,
     // Vision supplies a confidence score for every parsed coordinate.  Keep
     // automatic teleports conservative; ambiguous/low-confidence OCR stays
     // visible to the user but cannot move the device.
@@ -60,6 +61,7 @@ const GpsWatchControl: React.FC<Props> = ({
   const sessionRef = useRef(0)
   const targetUdidRef = useRef<string | null>(null)
   const ignoreStoppedRef = useRef(false)
+  const droppedCountRef = useRef(0)
 
   useEffect(() => { teleportRef.current = onTeleport }, [onTeleport])
   useEffect(() => { connectedRef.current = isConnected }, [isConnected])
@@ -91,6 +93,18 @@ const GpsWatchControl: React.FC<Props> = ({
     if (!gpsWatch) return
     return gpsWatch.onEvent((event) => {
       if (stoppingRef.current && event.event !== 'stopped') return
+      if (event.event === 'stopping') {
+        // A global Esc/Alt+Shift+G stop originates in Electron rather than
+        // this component. Invalidate the current frame epoch immediately so
+        // trailing helper frames and an in-flight teleport acknowledgement
+        // cannot revive the watcher after the user has left the mode.
+        stoppingRef.current = true
+        sessionRef.current += 1
+        detectorRef.current.reset()
+        setPhase('stopping')
+        setDetail('正在停止 GPS 畫面監看…')
+        return
+      }
       if (event.event === 'permission') {
         if (event.state === 'denied') {
           const message = '需要允許 LocWarp 使用「螢幕與系統錄音」權限，授權後請重新啟動 LocWarp。'
@@ -101,6 +115,12 @@ const GpsWatchControl: React.FC<Props> = ({
         } else {
           setDetail(event.state === 'granted' ? '螢幕擷取權限已允許' : '正在確認螢幕擷取權限…')
         }
+        return
+      }
+      if (event.event === 'warning') {
+        const message = event.message || 'GPS 畫面監看有一個可恢復的提醒'
+        setDetail(message)
+        onShowToast(message, 8000)
         return
       }
       if (event.event === 'started') {
@@ -118,19 +138,22 @@ const GpsWatchControl: React.FC<Props> = ({
           ? event.candidates
           : (event.texts ?? [])
         const result = detectorRef.current.observe(frameInput)
+        if (result.droppedCount > droppedCountRef.current) {
+          const dropped = result.droppedCount - droppedCountRef.current
+          droppedCountRef.current = result.droppedCount
+          onShowToast(`GPS 連續掃描速度過快，已略過 ${dropped} 筆較舊座標`, 5000)
+        }
         if (result.phase === 'baseline') {
           setPhase('watching')
           setDetail(`監看中 · 已略過目前 ${result.candidates.length} 筆座標`)
           return
         }
         if (result.phase === 'ambiguous') {
-          setAmbiguous(result.newCandidates)
-          setPhase('ambiguous')
-          setDetail(`同時發現 ${result.newCandidates.length} 筆新座標，已暫停`)
-          void stop(true).then(() => {
-            setPhase('ambiguous')
-            setDetail(`同時發現 ${result.newCandidates.length} 筆新座標，請選擇`)
-          })
+          // The continuous session processes multi-coordinate frames in a
+          // stable, deterministic order. Keep this branch as a defensive
+          // fallback for an older detector/runtime without stopping the scan.
+          setPhase('watching')
+          setDetail(`監看中 · 發現 ${result.newCandidates.length} 筆新座標，將依序處理`)
           return
         }
         if (result.phase === 'pending' && result.coordinate) {
@@ -187,6 +210,7 @@ const GpsWatchControl: React.FC<Props> = ({
       }
       if (event.event === 'stopped') {
         if (ignoreStoppedRef.current) return
+        stoppingRef.current = false
         setPhase('idle')
         setDetail(event.reason === 'hotkey' ? '已由快捷鍵停止 GPS 監看' : 'GPS 畫面監看已停止')
       }
@@ -252,6 +276,7 @@ const GpsWatchControl: React.FC<Props> = ({
     const session = sessionRef.current + 1
     sessionRef.current = session
     targetUdidRef.current = targetUdid
+    droppedCountRef.current = 0
     detectorRef.current.reset()
     setAmbiguous([])
     setPhase('selecting')

@@ -600,7 +600,13 @@ const App: React.FC = () => {
     try { setRecentPlaces(await api.getRecent()) } catch { /* silent */ }
   }, [])
   useEffect(() => { void refreshRecent() }, [refreshRecent])
-  const pushRecent = useCallback(async (lat: number, lng: number, kind: api.RecentKind, name?: string) => {
+  const pushRecent = useCallback(async (
+    lat: number,
+    lng: number,
+    kind: api.RecentKind,
+    name?: string,
+    options: { reverseGeocode?: boolean } = {},
+  ) => {
     try {
       await api.pushRecent({ lat, lng, kind, name: name || null })
       void refreshRecent()
@@ -609,7 +615,7 @@ const App: React.FC = () => {
       // and push again with a resolved short_name. Backend dedupe then
       // bumps the top entry and fills in its name field, so the list
       // stops showing the raw coord twice.
-      if (!name) {
+      if (!name && options.reverseGeocode !== false) {
         void (async () => {
           try {
             const geo = await api.reverseGeocode(lat, lng)
@@ -667,7 +673,9 @@ const App: React.FC = () => {
     await api.teleport(coordinate.lat, coordinate.lng, target.udid, true)
     sim.setCurrentPosition({ lat: coordinate.lat, lng: coordinate.lng })
     setPreviewPin(null)
-    void pushRecent(coordinate.lat, coordinate.lng, 'coord_teleport')
+    // Continuous OCR can emit several points per second. Keep the raw point
+    // in recents without starting a reverse-geocode request for every frame.
+    void pushRecent(coordinate.lat, coordinate.lng, 'coord_teleport', undefined, { reverseGeocode: false })
     showToast(`GPS 掃描瞬移：${coordinate.lat.toFixed(6)}, ${coordinate.lng.toFixed(6)}`)
   }, [device.connectedDevices, sim, pushRecent, showToast])
 
