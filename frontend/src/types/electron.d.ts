@@ -25,6 +25,34 @@ export interface DesktopApiConfig {
   token: string
 }
 
+export interface GpsWatchRegion {
+  displayId: number
+  displayBounds: { x: number; y: number; width: number; height: number }
+  scaleFactor: number
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
+export interface GpsWatchEvent {
+  event: 'ready' | 'permission' | 'started' | 'frame' | 'warning' | 'status' | 'error' | 'stopping' | 'stopped'
+  state?: string
+  code?: string | number | null
+  message?: string
+  reason?: string
+  frame?: number
+  text?: string
+  texts?: Array<{ text: string; confidence?: number; boundingBox?: number[] }>
+  candidates?: Array<{
+    latitude: number
+    longitude: number
+    text: string
+    confidence?: number
+    boundingBox?: number[]
+  }>
+}
+
 declare global {
   interface Window {
     electronAPI?: {
@@ -35,6 +63,14 @@ declare global {
       relaunchApp(): Promise<void>
       restartBackend(): Promise<RestartBackendResult>
       getDesktopApiConfig(): DesktopApiConfig
+      gpsWatch?: {
+        selectRegion(): Promise<{ ok: boolean; code?: string; region?: GpsWatchRegion }>
+        start(region: GpsWatchRegion): Promise<{ ok: boolean; code?: string; state?: string; helper?: string }>
+        stop(): Promise<{ ok: boolean; state?: string }>
+        status(): Promise<{ state: string; region: GpsWatchRegion | null; supported: boolean }>
+        showMain(): Promise<{ ok: boolean }>
+        onEvent(callback: (event: GpsWatchEvent) => void): () => void
+      }
       clipboard?: {
         readText(): Promise<string> | string
         writeText(text: string): Promise<void> | void

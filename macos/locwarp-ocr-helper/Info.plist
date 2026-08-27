@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleIdentifier</key>
+	<string>com.locwarp.ocr-helper</string>
+	<key>CFBundleName</key>
+	<string>LocWarp OCR Helper</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>12.3</string>
+	<key>NSScreenCaptureUsageDescription</key>
+	<string>LocWarp 需要擷取你選取的螢幕區域，以辨識框選的 GPS 座標。影像只在本機記憶體中處理，不會儲存或上傳。</string>
+</dict>
+</plist>

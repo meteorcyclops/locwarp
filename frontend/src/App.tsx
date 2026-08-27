@@ -19,8 +19,10 @@ import JoystickPad from './components/JoystickPad'
 import EtaBar from './components/EtaBar'
 import PauseControl from './components/PauseControl'
 import StatusBar from './components/StatusBar'
+import GpsWatchControl from './components/GpsWatchControl'
 import { DeviceChipRow } from './components/DeviceChipRow'
 import type { FanoutOutcome } from './hooks/useSimulation'
+import type { Coordinate as DetectedCoordinate } from './utils/coordinateDetector'
 
 // Summarise a group fan-out result into a single toast string.
 // Call from action handlers: showToast(toastForFanout(t, 'teleport', outcome, connectedDevices))
@@ -651,6 +653,27 @@ const App: React.FC = () => {
     }
     void pushRecent(lat, lng, source === 'coord' ? 'coord_teleport' : 'teleport')
   }, [sim, device, t, showToast, pushRecent])
+
+  // Screen OCR must target one explicitly selected device. Reusing the normal
+  // group teleport handler here would fan a passive screen match out to every
+  // connected phone, which is too surprising for an automatic action.
+  const handleGpsWatchTeleport = useCallback(async (
+    coordinate: DetectedCoordinate,
+    targetUdid: string,
+  ) => {
+    const target = device.connectedDevices.find((item) => item.udid === targetUdid)
+    if (!target) throw new Error('沒有已連線的 iPhone')
+    if (sim.status?.running) throw new Error('路線執行中，已停止自動瞬移')
+    await api.teleport(coordinate.lat, coordinate.lng, target.udid, true)
+    sim.setCurrentPosition({ lat: coordinate.lat, lng: coordinate.lng })
+    setPreviewPin(null)
+    void pushRecent(coordinate.lat, coordinate.lng, 'coord_teleport')
+    showToast(`GPS 掃描瞬移：${coordinate.lat.toFixed(6)}, ${coordinate.lng.toFixed(6)}`)
+  }, [device.connectedDevices, sim, pushRecent, showToast])
+
+  const gpsWatchTargetUdid = device.primaryDevice?.udid
+    ?? device.connectedDevices[0]?.udid
+    ?? null
 
   const mapApiRef = useRef<{
     panTo: (lat: number, lng: number, zoom?: number) => void
@@ -2277,6 +2300,13 @@ const App: React.FC = () => {
           onResume={handleResume}
           showBulkPasteOnMap={sim.mode === SimMode.Loop || sim.mode === SimMode.MultiStop}
           onBulkPasteOpen={() => { setRoutePasteText(''); setRoutePasteOpen(true); }}
+        />
+        <GpsWatchControl
+          isConnected={gpsWatchTargetUdid !== null}
+          isRouteRunning={Boolean(sim.status?.running)}
+          targetUdid={gpsWatchTargetUdid}
+          onTeleport={handleGpsWatchTeleport}
+          onShowToast={showToast}
         />
         {avatarPickerOpen && (
           <UserAvatarPicker

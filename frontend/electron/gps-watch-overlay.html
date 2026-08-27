@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>LocWarp GPS 框選</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; user-select: none; -webkit-user-select: none; }
+    html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; }
+    body {
+      cursor: crosshair;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: rgba(5, 8, 15, 0.32);
+    }
+    #hint {
+      position: fixed;
+      top: 28px;
+      left: 50%;
+      transform: translateX(-50%);
+      padding: 10px 16px;
+      color: #f4f7ff;
+      background: rgba(15, 19, 31, 0.92);
+      border: 1px solid rgba(108, 140, 255, 0.65);
+      border-radius: 12px;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+      font-size: 13px;
+      font-weight: 600;
+      letter-spacing: 0.01em;
+      pointer-events: none;
+      white-space: nowrap;
+    }
+    #hint small { display: block; margin-top: 2px; color: #aeb8d7; font-size: 11px; font-weight: 400; text-align: center; }
+    #selection {
+      position: fixed;
+      display: none;
+      border: 2px solid #68e0d4;
+      border-radius: 8px;
+      background: rgba(78, 205, 196, 0.08);
+      box-shadow: 0 0 0 99999px rgba(4, 7, 13, 0.48), 0 0 24px rgba(78, 205, 196, 0.5);
+      pointer-events: none;
+    }
+    #size {
+      position: absolute;
+      left: 8px;
+      top: 8px;
+      padding: 3px 7px;
+      border-radius: 6px;
+      color: #dffefa;
+      background: rgba(8, 18, 25, 0.82);
+      font: 11px ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+  </style>
+</head>
+<body>
+  <div id="hint">拖曳框住 GPS 會出現的區域<small>建議框成較窄的水平感應帶 · Esc 取消</small></div>
+  <div id="selection"><span id="size"></span></div>
+  <script>
+    const selection = document.getElementById('selection')
+    const sizeLabel = document.getElementById('size')
+    let start = null
+
+    const rectFor = (a, b) => ({
+      x: Math.min(a.x, b.x),
+      y: Math.min(a.y, b.y),
+      width: Math.abs(a.x - b.x),
+      height: Math.abs(a.y - b.y),
+    })
+
+    const draw = (rect) => {
+      selection.style.display = 'block'
+      selection.style.left = `${rect.x}px`
+      selection.style.top = `${rect.y}px`
+      selection.style.width = `${rect.width}px`
+      selection.style.height = `${rect.height}px`
+      sizeLabel.textContent = `${Math.round(rect.width)} × ${Math.round(rect.height)}`
+    }
+
+    window.addEventListener('pointerdown', (event) => {
+      if (event.button !== 0) return
+      start = { x: event.clientX, y: event.clientY }
+      draw({ x: start.x, y: start.y, width: 1, height: 1 })
+      document.body.setPointerCapture?.(event.pointerId)
+    })
+
+    window.addEventListener('pointermove', (event) => {
+      if (!start) return
+      draw(rectFor(start, { x: event.clientX, y: event.clientY }))
+    })
+
+    window.addEventListener('pointerup', (event) => {
+      if (!start || event.button !== 0) return
+      const rect = rectFor(start, { x: event.clientX, y: event.clientY })
+      start = null
+      if (rect.width < 32 || rect.height < 24) {
+        selection.style.display = 'none'
+        return
+      }
+      window.gpsWatchOverlay.complete({
+        x: Math.round(rect.x),
+        y: Math.round(rect.y),
+        width: Math.round(rect.width),
+        height: Math.round(rect.height),
+      })
+    })
+
+    window.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') window.gpsWatchOverlay.cancel()
+    })
+    window.addEventListener('contextmenu', (event) => {
+      event.preventDefault()
+      window.gpsWatchOverlay.cancel()
+    })
+  </script>
+</body>
+</html>

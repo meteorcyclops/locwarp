@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, shell, ipcMain, dialog } = require('electron')
+const { app, BrowserWindow, Menu, shell, ipcMain, dialog, screen, globalShortcut } = require('electron')
 const fs = require('fs')
 const path = require('path')
 const { spawn, execFile } = require('child_process')
@@ -230,6 +230,374 @@ const BACKEND_PORT = 8777
 const desktopApiToken = crypto.randomBytes(32).toString('hex')
 let backendStopPromise = null
 let quitAfterBackendStops = false
+let gpsWatchSelectionWindow = null
+let gpsWatchSelectionFinish = null
+let gpsWatchBorderWindow = null
+let gpsWatchProc = null
+let gpsWatchRegion = null
+let gpsWatchState = 'idle'
+let gpsWatchStdoutBuffer = ''
+let gpsWatchStopTimer = null
+let gpsWatchForceKillTimer = null
+let gpsWatchStartupTimer = null
+
+function sendGpsWatchEvent(payload) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('gps-watch:event', payload)
+  }
+}
+
+function resolveGpsWatchHelper() {
+  const candidates = app.isPackaged
+    ? [
+        path.join(process.resourcesPath, 'gps-watch', 'locwarp-ocr-helper'),
+        path.join(process.resourcesPath, 'locwarp-ocr-helper'),
+      ]
+    : [
+        path.join(__dirname, '../../dist-macos/locwarp-ocr-helper'),
+        path.join(__dirname, '../../macos/build/locwarp-ocr-helper'),
+        path.join(__dirname, '../../macos/locwarp-ocr-helper/.build/release/locwarp-ocr-helper'),
+      ]
+  return candidates.find((candidate) => fs.existsSync(candidate)) ?? candidates[0]
+}
+
+function closeGpsWatchBorder() {
+  if (gpsWatchBorderWindow && !gpsWatchBorderWindow.isDestroyed()) gpsWatchBorderWindow.close()
+  gpsWatchBorderWindow = null
+}
+
+function showGpsWatchBorder(region) {
+  closeGpsWatchBorder()
+  const bounds = region?.displayBounds
+  if (!bounds) return
+  const width = Math.max(48, Math.round(region.width))
+  const height = Math.max(32, Math.round(region.height))
+  gpsWatchBorderWindow = new BrowserWindow({
+    x: Math.round(bounds.x + region.x),
+    y: Math.round(bounds.y + region.y),
+    width,
+    height,
+    frame: false,
+    transparent: true,
+    backgroundColor: '#00000000',
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    resizable: false,
+    movable: false,
+    fullscreenable: false,
+    focusable: false,
+    hasShadow: false,
+    webPreferences: { nodeIntegration: false, contextIsolation: true },
+  })
+  gpsWatchBorderWindow.setAlwaysOnTop(true, 'floating')
+  gpsWatchBorderWindow.setIgnoreMouseEvents(true)
+  const html = `<!doctype html><meta charset="utf-8"><style>
+    html,body{margin:0;width:100%;height:100%;overflow:hidden;background:transparent}
+    body{box-sizing:border-box;border:2px solid #4ecdc4;border-radius:8px;box-shadow:inset 0 0 0 1px rgba(255,255,255,.2),0 0 14px rgba(78,205,196,.55)}
+    span{position:absolute;top:5px;left:7px;padding:3px 7px;border-radius:6px;background:rgba(8,18,25,.88);color:#dffefa;font:600 10px -apple-system,BlinkMacSystemFont,sans-serif;white-space:nowrap}
+  </style><span>LocWarp GPS 掃描中 · ⌥⇧G 停止</span>`
+  gpsWatchBorderWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`)
+  gpsWatchBorderWindow.showInactive()
+}
+
+function clearGpsWatchProcessState() {
+  if (gpsWatchStopTimer) clearTimeout(gpsWatchStopTimer)
+  if (gpsWatchForceKillTimer) clearTimeout(gpsWatchForceKillTimer)
+  if (gpsWatchStartupTimer) clearTimeout(gpsWatchStartupTimer)
+  gpsWatchStopTimer = null
+  gpsWatchForceKillTimer = null
+  gpsWatchStartupTimer = null
+  gpsWatchProc = null
+  gpsWatchStdoutBuffer = ''
+  gpsWatchState = 'idle'
+  gpsWatchRegion = null
+  closeGpsWatchBorder()
+  globalShortcut.unregister('Alt+Shift+G')
+}
+
+function writeGpsWatchCommand(child, command) {
+  if (
+    !child ||
+    child !== gpsWatchProc ||
+    child.killed ||
+    !child.stdin ||
+    child.stdin.destroyed ||
+    !child.stdin.writable
+  ) return false
+  try {
+    child.stdin.write(`${JSON.stringify(command)}\n`, (error) => {
+      if (error) console.error('[gps-watch-helper] stdin write failed:', error.message)
+    })
+    return true
+  } catch (error) {
+    console.error('[gps-watch-helper] stdin write failed:', error.message)
+    return false
+  }
+}
+
+async function stopGpsWatch(reason = 'user') {
+  if (gpsWatchSelectionFinish) {
+    finishGpsWatchSelection({ ok: false, code: 'cancelled_by_stop', reason })
+  }
+  const child = gpsWatchProc
+  if (!child) {
+    clearGpsWatchProcessState()
+    return { ok: true, state: 'idle' }
+  }
+  if (gpsWatchState === 'stopping') {
+    await waitForChildExit(child, 3500)
+    return { ok: true, state: child === gpsWatchProc ? 'stopping' : 'idle' }
+  }
+  gpsWatchState = 'stopping'
+  writeGpsWatchCommand(child, { command: 'shutdown' })
+  gpsWatchStopTimer = setTimeout(() => {
+    try { child.kill('SIGTERM') } catch {}
+  }, 1200)
+  gpsWatchForceKillTimer = setTimeout(() => {
+    if (child === gpsWatchProc) {
+      try { child.kill('SIGKILL') } catch {}
+    }
+  }, 3000)
+  closeGpsWatchBorder()
+  sendGpsWatchEvent({ event: 'stopping', reason })
+  const exited = await waitForChildExit(child, 3500)
+  if (!exited && child === gpsWatchProc) {
+    try { child.kill('SIGKILL') } catch {}
+    await waitForChildExit(child, 1500)
+  }
+  if (child === gpsWatchProc) {
+    clearGpsWatchProcessState()
+    sendGpsWatchEvent({ event: 'stopped', reason: 'forced_shutdown' })
+  }
+  return { ok: true, state: 'idle' }
+}
+
+function handleGpsWatchLine(line, child) {
+  if (!line.trim()) return
+  let payload
+  try {
+    payload = JSON.parse(line)
+  } catch {
+    sendGpsWatchEvent({ event: 'error', code: 'invalid_helper_output', message: line.slice(0, 240) })
+    return
+  }
+  if (child !== gpsWatchProc) return
+  if (payload.event === 'ready') {
+    if (gpsWatchState !== 'starting') return
+    const region = gpsWatchRegion
+    if (!region) return
+    if (!writeGpsWatchCommand(child, {
+      command: 'start',
+      displayID: region.displayId,
+      roi: {
+        x: region.x,
+        y: region.y,
+        width: region.width,
+        height: region.height,
+        units: 'points',
+        scale: region.scaleFactor,
+      },
+      fps: 5,
+      recognitionLevel: 'accurate',
+    })) {
+      gpsWatchState = 'error'
+      sendGpsWatchEvent({ event: 'error', code: 'helper_stdin_closed', message: 'GPS OCR helper 已提前結束' })
+    }
+  } else if (payload.event === 'started') {
+    if (gpsWatchState !== 'starting') return
+    if (gpsWatchStartupTimer) clearTimeout(gpsWatchStartupTimer)
+    gpsWatchStartupTimer = null
+    gpsWatchState = 'watching'
+    showGpsWatchBorder(gpsWatchRegion)
+  } else if (payload.event === 'error') {
+    gpsWatchState = payload.code === 'permission_denied' ? 'permission_denied' : 'error'
+  }
+  sendGpsWatchEvent(payload)
+}
+
+function startGpsWatch(region) {
+  if (process.platform !== 'darwin') return { ok: false, code: 'unsupported_platform' }
+  if (gpsWatchProc) return { ok: false, code: 'already_running' }
+  if (!region || !Number.isFinite(region.displayId) || region.width < 32 || region.height < 24) {
+    return { ok: false, code: 'invalid_region' }
+  }
+  const helper = resolveGpsWatchHelper()
+  if (!fs.existsSync(helper)) return { ok: false, code: 'helper_missing', helper }
+
+  gpsWatchRegion = region
+  gpsWatchState = 'starting'
+  gpsWatchStdoutBuffer = ''
+  const child = spawn(helper, [], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true })
+  gpsWatchProc = child
+
+  gpsWatchStartupTimer = setTimeout(() => {
+    if (child !== gpsWatchProc || gpsWatchState !== 'starting') return
+    gpsWatchState = 'error'
+    sendGpsWatchEvent({
+      event: 'error',
+      code: 'startup_timeout',
+      message: 'GPS OCR helper 啟動逾時，請檢查螢幕擷取權限後重試',
+    })
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.show()
+      mainWindow.focus()
+    }
+    void stopGpsWatch('startup_timeout')
+  }, 30000)
+
+  child.stdout.setEncoding('utf8')
+  child.stdout.on('data', (chunk) => {
+    if (child !== gpsWatchProc) return
+    gpsWatchStdoutBuffer += chunk
+    let newline
+    while ((newline = gpsWatchStdoutBuffer.indexOf('\n')) >= 0) {
+      const line = gpsWatchStdoutBuffer.slice(0, newline)
+      gpsWatchStdoutBuffer = gpsWatchStdoutBuffer.slice(newline + 1)
+      handleGpsWatchLine(line, child)
+    }
+  })
+  child.stderr.setEncoding('utf8')
+  child.stderr.on('data', (chunk) => {
+    console.error('[gps-watch-helper]', String(chunk).trim())
+  })
+  child.stdin.on('error', (error) => {
+    if (child !== gpsWatchProc || gpsWatchState === 'stopping') return
+    gpsWatchState = 'error'
+    sendGpsWatchEvent({ event: 'error', code: 'helper_stdin_error', message: error.message })
+  })
+  child.on('error', (error) => {
+    if (child !== gpsWatchProc) return
+    sendGpsWatchEvent({ event: 'error', code: 'helper_spawn_failed', message: error.message })
+    clearGpsWatchProcessState()
+  })
+  child.on('exit', (code, signal) => {
+    if (child !== gpsWatchProc) return
+    const wasStopping = gpsWatchState === 'stopping'
+    clearGpsWatchProcessState()
+    sendGpsWatchEvent({
+      event: 'stopped',
+      reason: wasStopping ? 'user' : 'helper_exit',
+      code,
+      signal,
+    })
+  })
+
+  globalShortcut.unregister('Alt+Shift+G')
+  globalShortcut.register('Alt+Shift+G', () => {
+    const stopPromise = stopGpsWatch('hotkey')
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.show()
+      mainWindow.focus()
+    }
+    void stopPromise
+  })
+  return { ok: true, state: 'starting', region }
+}
+
+function finishGpsWatchSelection(result) {
+  const finish = gpsWatchSelectionFinish
+  gpsWatchSelectionFinish = null
+  if (gpsWatchSelectionWindow && !gpsWatchSelectionWindow.isDestroyed()) {
+    gpsWatchSelectionWindow.close()
+  }
+  gpsWatchSelectionWindow = null
+  if (!result?.ok && result?.code !== 'app_quit' && mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.show()
+    mainWindow.focus()
+  }
+  if (finish) finish(result)
+}
+
+ipcMain.on('gps-watch:overlay-complete', (event, rect) => {
+  if (!gpsWatchSelectionWindow || event.sender !== gpsWatchSelectionWindow.webContents) return
+  const x = Math.max(0, Math.round(Number(rect?.x) || 0))
+  const y = Math.max(0, Math.round(Number(rect?.y) || 0))
+  const width = Math.round(Number(rect?.width) || 0)
+  const height = Math.round(Number(rect?.height) || 0)
+  if (width < 32 || height < 24) return
+  const display = screen.getDisplayMatching(gpsWatchSelectionWindow.getBounds())
+  finishGpsWatchSelection({
+    ok: true,
+    region: {
+      displayId: display.id,
+      displayBounds: display.bounds,
+      scaleFactor: display.scaleFactor,
+      x,
+      y,
+      width: Math.min(width, display.bounds.width - x),
+      height: Math.min(height, display.bounds.height - y),
+    },
+  })
+})
+
+ipcMain.on('gps-watch:overlay-cancel', (event) => {
+  if (!gpsWatchSelectionWindow || event.sender !== gpsWatchSelectionWindow.webContents) return
+  finishGpsWatchSelection({ ok: false, code: 'cancelled' })
+})
+
+ipcMain.handle('gps-watch:select-region', async () => {
+  if (process.platform !== 'darwin') {
+    return { ok: false, code: 'unsupported_platform' }
+  }
+  if (gpsWatchSelectionFinish) {
+    return { ok: false, code: 'selection_in_progress' }
+  }
+
+  const display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint())
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.hide()
+
+  return new Promise((resolve) => {
+    gpsWatchSelectionFinish = resolve
+    gpsWatchSelectionWindow = new BrowserWindow({
+      x: display.bounds.x,
+      y: display.bounds.y,
+      width: display.bounds.width,
+      height: display.bounds.height,
+      frame: false,
+      transparent: true,
+      backgroundColor: '#00000000',
+      alwaysOnTop: true,
+      skipTaskbar: true,
+      resizable: false,
+      movable: false,
+      fullscreenable: false,
+      hasShadow: false,
+      show: false,
+      webPreferences: {
+        nodeIntegration: false,
+        contextIsolation: true,
+        preload: path.join(__dirname, 'gps-watch-overlay-preload.js'),
+      },
+    })
+    gpsWatchSelectionWindow.setAlwaysOnTop(true, 'screen-saver')
+    gpsWatchSelectionWindow.loadFile(path.join(__dirname, 'gps-watch-overlay.html')).catch((error) => {
+      finishGpsWatchSelection({ ok: false, code: 'overlay_load_failed', message: error.message })
+    })
+    gpsWatchSelectionWindow.once('ready-to-show', () => {
+      gpsWatchSelectionWindow?.show()
+      gpsWatchSelectionWindow?.focus()
+    })
+    gpsWatchSelectionWindow.on('closed', () => {
+      gpsWatchSelectionWindow = null
+      if (gpsWatchSelectionFinish) finishGpsWatchSelection({ ok: false, code: 'cancelled' })
+    })
+  })
+})
+
+ipcMain.handle('gps-watch:start', (_event, region) => startGpsWatch(region))
+ipcMain.handle('gps-watch:stop', () => stopGpsWatch('user'))
+ipcMain.handle('gps-watch:status', () => ({
+  state: gpsWatchState,
+  region: gpsWatchRegion,
+  supported: process.platform === 'darwin',
+}))
+ipcMain.handle('gps-watch:show-main', () => {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.show()
+    mainWindow.focus()
+  }
+  return { ok: true }
+})
 
 ipcMain.on('get-desktop-api-config', (event) => {
   event.returnValue = {
@@ -554,7 +922,7 @@ async function createWindow() {
         const u = new URL(details.url)
         if (OSM_HOSTS.includes(u.hostname)) {
           details.requestHeaders['User-Agent'] =
-            'LocWarp-koxuan/0.2.193-kx.5 (+https://github.com/meteorcyclops/locwarp)'
+            'LocWarp-koxuan/0.2.193-kx.6 (+https://github.com/meteorcyclops/locwarp)'
           details.requestHeaders['Referer'] = 'https://github.com/meteorcyclops/locwarp'
         }
       } catch {}
@@ -588,6 +956,11 @@ async function createWindow() {
   // Show the window once the first frame is painted. Combined with
   // backgroundColor above, this eliminates the blank/white boot state.
   mainWindow.once('ready-to-show', () => { mainWindow.show() })
+  const createdWindow = mainWindow
+  createdWindow.on('closed', () => {
+    if (mainWindow === createdWindow) mainWindow = null
+    void stopGpsWatch('main_window_closed')
+  })
 
   // Open target="_blank" / external links in the user's default browser
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
@@ -622,9 +995,21 @@ app.on('window-all-closed', () => {
   }
 })
 app.on('before-quit', (event) => {
+  if (gpsWatchProc) {
+    try { gpsWatchProc.kill('SIGKILL') } catch {}
+    clearGpsWatchProcessState()
+  }
+  finishGpsWatchSelection({ ok: false, code: 'app_quit' })
   if (quitAfterBackendStops || !backendProc) return
   event.preventDefault()
   quitAfterBackendStops = true
   void stopBackend().finally(() => app.exit(0))
 })
-app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow() })
+app.on('activate', () => {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.show()
+    mainWindow.focus()
+  } else {
+    void createWindow()
+  }
+})

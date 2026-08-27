@@ -199,8 +199,13 @@ export const setBookmarkUiState = (expanded_categories: string[]) =>
 const ud = (udid?: string | null) => (udid ? { udid } : {})
 const qs = (udid?: string | null) => (udid ? `?udid=${encodeURIComponent(udid)}` : '')
 
-export const teleport = (lat: number, lng: number, udid?: string) =>
-  request<any>('POST', '/api/location/teleport', { lat, lng, ...ud(udid) })
+export const teleport = (lat: number, lng: number, udid?: string, requireIdle = false) =>
+  request<any>('POST', '/api/location/teleport', {
+    lat,
+    lng,
+    ...ud(udid),
+    ...(requireIdle ? { require_idle: true } : {}),
+  })
 export const goldDittoCycle = (lat: number, lng: number, hold_ms = 500, udid?: string) =>
   request<any>('POST', '/api/location/goldditto/cycle', { lat, lng, hold_ms, ...ud(udid) })
 export interface SpeedOpts { speed_kmh?: number | null; speed_min_kmh?: number | null; speed_max_kmh?: number | null }

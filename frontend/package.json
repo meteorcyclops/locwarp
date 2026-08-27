@@ -1,6 +1,6 @@
 {
   "name": "locwarp",
-  "version": "0.2.193-kx.5",
+  "version": "0.2.193-kx.6",
   "description": "iOS Virtual Location Simulator",
   "author": "keezxc1223",
   "main": "electron/main.js",
@@ -52,7 +52,16 @@
       }
     ],
     "mac": {
-      "icon": "build/icon.icns"
+      "icon": "build/icon.icns",
+      "extraResources": [
+        {
+          "from": "../dist-macos/locwarp-ocr-helper",
+          "to": "locwarp-ocr-helper"
+        }
+      ],
+      "extendInfo": {
+        "NSScreenCaptureUsageDescription": "LocWarp 需要擷取你選取的螢幕區域，以辨識框選的 GPS 座標。影像只在本機記憶體中處理，不會儲存或上傳。"
+      }
     },
     "win": {
       "target": [

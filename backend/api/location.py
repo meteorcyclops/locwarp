@@ -342,6 +342,15 @@ async def teleport(req: TeleportRequest):
     # rebuilds it, so a captured reference would point at the dead one.
     async def _do_teleport():
         eng = await _engine(action_udid)
+        if req.require_idle and eng.state != SimulationState.IDLE:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "simulation_not_idle",
+                    "message": "路線或其他定位動作執行中，已取消 GPS 自動瞬移",
+                    "state": eng.state.value,
+                },
+            )
         await eng.teleport(req.lat, req.lng)
 
     try:

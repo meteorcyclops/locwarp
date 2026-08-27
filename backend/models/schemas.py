@@ -52,6 +52,9 @@ class TeleportRequest(BaseModel):
     lat: float = Field(ge=-90.0, le=90.0)
     lng: float = Field(ge=-180.0, le=180.0)
     udid: str | None = None
+    # Passive automations must never interrupt an active route. Manual calls
+    # preserve the established behavior unless they explicitly opt in.
+    require_idle: bool = False
 
 
 class NavigateRequest(BaseModel):

@@ -1146,6 +1146,149 @@ textarea:focus {
   box-shadow: 0 12px 32px rgba(255, 71, 87, 0.5), 0 4px 10px rgba(12, 18, 40, 0.45);
 }
 
+/* ---------- Screen GPS watch ---------- */
+.gps-watch-control {
+  position: absolute;
+  bottom: 52px;
+  right: 14px;
+  z-index: var(--z-map-ui);
+  width: min(320px, calc(100% - 28px));
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+  pointer-events: none;
+}
+
+.gps-watch-button,
+.gps-watch-detail,
+.gps-watch-ambiguous {
+  pointer-events: auto;
+}
+
+.gps-watch-button {
+  min-height: 38px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 13px;
+  color: #dbe3ff;
+  background: rgba(17, 21, 34, 0.91);
+  border: 1px solid rgba(108, 140, 255, 0.48);
+  border-radius: 12px;
+  box-shadow: 0 8px 24px rgba(6, 10, 24, 0.4);
+  backdrop-filter: blur(18px) saturate(150%);
+  -webkit-backdrop-filter: blur(18px) saturate(150%);
+  font-size: 12px;
+  font-weight: 650;
+  cursor: pointer;
+  transition: transform var(--transition-fast), border-color var(--transition-fast), background var(--transition-fast);
+}
+
+.gps-watch-button:hover:not(:disabled) {
+  transform: translateY(-1px);
+  border-color: rgba(138, 163, 255, 0.8);
+  background: rgba(27, 32, 50, 0.96);
+}
+
+.gps-watch-button:disabled {
+  cursor: wait;
+  opacity: 0.68;
+}
+
+.gps-watch-button svg {
+  width: 17px;
+  height: 17px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  flex-shrink: 0;
+}
+
+.gps-watch-button.active {
+  color: #dffefa;
+  border-color: rgba(78, 205, 196, 0.72);
+  background: rgba(11, 39, 42, 0.92);
+}
+
+.gps-watch-button i {
+  width: 7px;
+  height: 7px;
+  margin-left: 2px;
+  border-radius: 50%;
+  background: #4ecdc4;
+  box-shadow: 0 0 0 0 rgba(78, 205, 196, 0.6);
+  animation: gps-watch-pulse 1.6s ease-out infinite;
+}
+
+@keyframes gps-watch-pulse {
+  0% { box-shadow: 0 0 0 0 rgba(78, 205, 196, 0.58); }
+  70%, 100% { box-shadow: 0 0 0 7px rgba(78, 205, 196, 0); }
+}
+
+.gps-watch-detail {
+  max-width: 100%;
+  padding: 5px 9px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 8px;
+  color: #aeb8d7;
+  background: rgba(12, 15, 25, 0.86);
+  box-shadow: 0 4px 14px rgba(6, 10, 24, 0.3);
+  font-size: 10px;
+  line-height: 1.35;
+  text-align: right;
+}
+
+.gps-watch-detail code {
+  display: block;
+  margin-top: 2px;
+  color: #9ee9e1;
+  font-size: 10px;
+}
+
+.phase-error .gps-watch-button,
+.phase-ambiguous .gps-watch-button {
+  border-color: rgba(255, 190, 85, 0.7);
+}
+
+.gps-watch-ambiguous {
+  width: 100%;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  color: #eef2ff;
+  background: rgba(20, 24, 38, 0.97);
+  border: 1px solid rgba(255, 190, 85, 0.55);
+  border-radius: 12px;
+  box-shadow: 0 12px 32px rgba(6, 10, 24, 0.58);
+}
+
+.gps-watch-ambiguous strong {
+  color: #ffd58a;
+  font-size: 11px;
+}
+
+.gps-watch-ambiguous button {
+  padding: 7px 9px;
+  color: #dffefa;
+  background: rgba(78, 205, 196, 0.11);
+  border: 1px solid rgba(78, 205, 196, 0.35);
+  border-radius: 8px;
+  font: 11px ui-monospace, SFMono-Regular, Menlo, monospace;
+  cursor: pointer;
+}
+
+.gps-watch-ambiguous button:hover {
+  background: rgba(78, 205, 196, 0.2);
+}
+
+.gps-watch-ambiguous button.cancel {
+  color: #aeb8d7;
+  background: transparent;
+  border-color: rgba(255, 255, 255, 0.12);
+}
+
 /* Subtle noise overlay — breaks up perfectly flat dark surfaces without
    calling attention to itself. Uses an inline SVG so no extra request. */
 .noise-overlay {

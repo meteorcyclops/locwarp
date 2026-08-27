@@ -16,11 +16,14 @@ frontend/.vite/
 # ── PyInstaller / electron-builder build artifacts ──
 dist-py/
 build-py/
+dist-macos/
+build-macos/
 frontend/release/
 frontend/release-tmp/
 frontend/release-tmp*/
 frontend/release-new/
 *.spec.bak
+backups/
 
 # ── Runtime state ───────────────────────────────────
 wifi_tunnel_info.json

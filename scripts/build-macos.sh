@@ -28,6 +28,62 @@ fi
 node --version >/dev/null
 npm --version >/dev/null
 
+# Build the local-only ScreenCaptureKit + Vision OCR helper before invoking
+# electron-builder. It is shipped as an extraResource so Electron can spawn it
+# without putting capture code in the renderer or Node main process.
+helper_source="$repo_dir/macos/locwarp-ocr-helper/main.swift"
+helper_info_plist="$repo_dir/macos/locwarp-ocr-helper/Info.plist"
+helper_output_dir="$repo_dir/dist-macos"
+macos_arch="${MACOS_ARCH:-arm64}"
+
+case "$macos_arch" in
+  arm64|x86_64)
+    helper_target="${macos_arch}-apple-macosx12.3"
+    mkdir -p "$helper_output_dir"
+    xcrun swiftc "$helper_source" -O -whole-module-optimization \
+      -target "$helper_target" \
+      -framework AppKit \
+      -framework CoreGraphics \
+      -framework CoreMedia \
+      -framework ImageIO \
+      -framework ScreenCaptureKit \
+      -framework Vision \
+      -Xlinker -sectcreate \
+      -Xlinker __TEXT \
+      -Xlinker __info_plist \
+      -Xlinker "$helper_info_plist" \
+      -o "$helper_output_dir/locwarp-ocr-helper"
+    chmod 755 "$helper_output_dir/locwarp-ocr-helper"
+    ;;
+  universal)
+    mkdir -p "$helper_output_dir"
+    for helper_arch in arm64 x86_64; do
+      xcrun swiftc "$helper_source" -O -whole-module-optimization \
+        -target "${helper_arch}-apple-macosx12.3" \
+        -framework AppKit \
+        -framework CoreGraphics \
+        -framework CoreMedia \
+        -framework ImageIO \
+        -framework ScreenCaptureKit \
+        -framework Vision \
+        -Xlinker -sectcreate \
+        -Xlinker __TEXT \
+        -Xlinker __info_plist \
+        -Xlinker "$helper_info_plist" \
+        -o "$helper_output_dir/locwarp-ocr-helper-$helper_arch"
+    done
+    lipo -create \
+      "$helper_output_dir/locwarp-ocr-helper-arm64" \
+      "$helper_output_dir/locwarp-ocr-helper-x86_64" \
+      -output "$helper_output_dir/locwarp-ocr-helper"
+    chmod 755 "$helper_output_dir/locwarp-ocr-helper"
+    ;;
+  *)
+    echo "MACOS_ARCH must be arm64, x86_64, or universal (got $macos_arch)." >&2
+    exit 1
+    ;;
+esac
+
 python3 -m venv "$venv_dir"
 "$venv_dir/bin/python" -m pip install -r "$repo_dir/backend/requirements.txt" "pyinstaller==6.21.0"
 
@@ -55,7 +111,22 @@ PY
   npm ci
   npm test
   npm run build
-  npx electron-builder --mac dir --arm64 -c.mac.identity=null
+  case "$macos_arch" in
+    arm64) npx electron-builder --mac dir --arm64 -c.mac.identity=null ;;
+    x86_64) npx electron-builder --mac dir --x64 -c.mac.identity=null ;;
+    universal) npx electron-builder --mac dir --universal -c.mac.identity=null ;;
+  esac
 )
 
-echo "Built: $repo_dir/frontend/release/mac-arm64/LocWarp.app"
+case "$macos_arch" in
+  arm64) release_dir="mac-arm64" ;;
+  x86_64) release_dir="mac" ;;
+  universal) release_dir="mac" ;;
+esac
+app_path="$repo_dir/frontend/release/$release_dir/LocWarp.app"
+# identity=null keeps local builds independent of a Developer ID certificate,
+# but Electron's nested framework signatures still need a final consistent
+# ad-hoc seal after extraResources (including the OCR helper) are copied in.
+codesign --force --deep --sign - "$app_path"
+codesign --verify --deep --strict "$app_path"
+echo "Built and ad-hoc signed: $app_path"
