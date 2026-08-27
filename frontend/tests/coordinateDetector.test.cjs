@@ -155,6 +155,148 @@ test('continuous FIFO is bounded and reports discarded oldest candidates', async
   assert.equal(detector.getSnapshot().droppedCount, 6);
 });
 
+test('continuous complete policy preserves FIFO order for several queued stable candidates', async () => {
+  const { CoordinateAutoDetector } = await moduleUnderTest;
+  const detector = new CoordinateAutoDetector({ continuous: true, minIntervalMs: 0 });
+  assert.equal(detector.options.queuePolicy, 'complete');
+  detector.observe('25.033,121.565', 0);
+
+  detector.observe('25.034,121.566', 10);
+  const first = detector.observe('25.034,121.566', 20);
+  assert.equal(first.ready, true);
+
+  detector.observe('25.035,121.567', 30);
+  detector.observe('25.035,121.567', 40);
+  detector.observe('25.036,121.568', 50);
+  const queued = detector.observe('25.036,121.568', 60);
+  assert.equal(queued.phase, 'awaiting_result');
+  assert.deepEqual(detector.getSnapshot().queued, [
+    { lat: 25.035, lng: 121.567 },
+    { lat: 25.036, lng: 121.568 },
+  ]);
+
+  assert.equal(detector.markSucceeded(first.attemptId, 61), true);
+  const second = detector.observe('25.033,121.565', 62);
+  assert.deepEqual(second.coordinate, { lat: 25.035, lng: 121.567 });
+  assert.equal(second.ready, true);
+  assert.equal(detector.markSucceeded(second.attemptId, 63), true);
+  const third = detector.observe('25.033,121.565', 64);
+  assert.deepEqual(third.coordinate, { lat: 25.036, lng: 121.568 });
+  assert.equal(third.ready, true);
+});
+
+test('continuous queue entries expire by TTL and report cumulative expiredCount', async () => {
+  const { CoordinateAutoDetector } = await moduleUnderTest;
+  const detector = new CoordinateAutoDetector({ continuous: true, minIntervalMs: 0, queueMaxAgeMs: 50 });
+  detector.observe('25.033,121.565', 0);
+  detector.observe('25.034,121.566', 10);
+  const first = detector.observe('25.034,121.566', 20);
+  assert.equal(first.ready, true);
+
+  detector.observe('25.034,121.566\n25.035,121.567', 30);
+  detector.observe('25.034,121.566\n25.035,121.567', 40);
+  assert.deepEqual(detector.getSnapshot().queuedEntries, [{
+    coordinate: { lat: 25.035, lng: 121.567 },
+    timestamp: 40,
+  }]);
+
+  const expired = detector.observe('25.033,121.565', 90);
+  assert.equal(expired.phase, 'awaiting_result');
+  assert.equal(expired.reason, 'queue_expired');
+  assert.equal(expired.expiredCount, 1);
+  assert.deepEqual(detector.getSnapshot().queued, []);
+  assert.equal(detector.getSnapshot().expiredCount, 1);
+  assert.equal(detector.markSucceeded(first.attemptId, 91), true);
+});
+
+test('queueMaxAgeMs <= 0 keeps queued candidates indefinitely', async () => {
+  const { CoordinateAutoDetector } = await moduleUnderTest;
+  const detector = new CoordinateAutoDetector({ continuous: true, minIntervalMs: 0, queueMaxAgeMs: -1 });
+  detector.observe('25.033,121.565', 0);
+  const first = detector.observe('25.034,121.566', 10);
+  const ready = detector.observe('25.034,121.566', 20);
+  assert.equal(ready.ready, true);
+  assert.equal(first.ready, false);
+
+  detector.observe('25.034,121.566\n25.035,121.567', 30);
+  detector.observe('25.034,121.566\n25.035,121.567', 40);
+  const later = detector.observe('25.033,121.565', 10000);
+  assert.equal(later.expiredCount, 0);
+  assert.deepEqual(detector.getSnapshot().queued, [{ lat: 25.035, lng: 121.567 }]);
+  assert.equal(detector.markSucceeded(ready.attemptId, 10001), true);
+});
+
+test('continuous latest policy replaces an older queued candidate without an in-flight attempt', async () => {
+  const { CoordinateAutoDetector } = await moduleUnderTest;
+  const detector = new CoordinateAutoDetector({
+    continuous: true,
+    minIntervalMs: 100,
+    queuePolicy: 'latest',
+  });
+  detector.observe('25.033,121.565', 0);
+  detector.observe('25.034,121.566', 10);
+  const first = detector.observe('25.034,121.566', 20);
+  assert.equal(first.ready, true);
+  assert.equal(detector.markSucceeded(first.attemptId, 21), true);
+
+  detector.observe('25.035,121.567', 30);
+  const older = detector.observe('25.035,121.567', 40);
+  assert.equal(older.phase, 'throttled');
+  assert.deepEqual(detector.getSnapshot().queued, [{ lat: 25.035, lng: 121.567 }]);
+
+  detector.observe('25.036,121.568', 50);
+  const latest = detector.observe('25.036,121.568', 60);
+  assert.equal(latest.phase, 'throttled');
+  assert.deepEqual(latest.coordinate, { lat: 25.036, lng: 121.568 });
+  assert.deepEqual(detector.getSnapshot().queued, [{ lat: 25.036, lng: 121.568 }]);
+  assert.equal(detector.getSnapshot().droppedCount, 1);
+  assert.equal(detector.getSnapshot().queuedEntries[0].timestamp, 60);
+});
+
+test('continuous latest policy keeps only the newest queued candidate during in-flight work', async () => {
+  const { CoordinateAutoDetector } = await moduleUnderTest;
+  const detector = new CoordinateAutoDetector({ continuous: true, minIntervalMs: 0, queuePolicy: 'latest' });
+  detector.observe('25.033,121.565', 0);
+  detector.observe('25.034,121.566', 10);
+  const first = detector.observe('25.034,121.566', 20);
+  assert.equal(first.ready, true);
+
+  detector.observe('25.034,121.566\n25.035,121.567', 30);
+  const older = detector.observe('25.034,121.566\n25.035,121.567', 40);
+  assert.equal(older.phase, 'awaiting_result');
+  assert.deepEqual(detector.getSnapshot().queued, [{ lat: 25.035, lng: 121.567 }]);
+
+  detector.observe('25.034,121.566\n25.036,121.568', 50);
+  const latest = detector.observe('25.034,121.566\n25.036,121.568', 60);
+  assert.equal(latest.phase, 'awaiting_result');
+  assert.deepEqual(latest.coordinate, { lat: 25.034, lng: 121.566 });
+  assert.deepEqual(detector.getSnapshot().inFlight.coordinate, { lat: 25.034, lng: 121.566 });
+  assert.deepEqual(detector.getSnapshot().queued, [{ lat: 25.036, lng: 121.568 }]);
+  assert.equal(detector.getSnapshot().droppedCount, 1);
+
+  assert.equal(detector.markSucceeded(first.attemptId, 61), true);
+  const next = detector.observe('25.033,121.565', 62);
+  assert.equal(next.ready, true);
+  assert.deepEqual(next.coordinate, { lat: 25.036, lng: 121.568 });
+});
+
+test('continuous latest policy keeps newer queued work ahead of a failed older attempt', async () => {
+  const { CoordinateAutoDetector } = await moduleUnderTest;
+  const detector = new CoordinateAutoDetector({ continuous: true, minIntervalMs: 0, queuePolicy: 'latest' });
+  detector.observe('25.033,121.565', 0);
+  detector.observe('25.034,121.566', 10);
+  const first = detector.observe('25.034,121.566', 20);
+  assert.equal(first.ready, true);
+
+  detector.observe('25.034,121.566\n25.035,121.567', 30);
+  detector.observe('25.034,121.566\n25.035,121.567', 40);
+  assert.deepEqual(detector.getSnapshot().queued, [{ lat: 25.035, lng: 121.567 }]);
+
+  assert.equal(detector.markFailed(first.attemptId, 41), true);
+  assert.deepEqual(detector.getSnapshot().queued, [{ lat: 25.035, lng: 121.567 }]);
+  assert.equal(detector.getSnapshot().droppedCount, 1);
+});
+
 test('continuous reset invalidates in-flight work and clears the FIFO', async () => {
   const { CoordinateAutoDetector } = await moduleUnderTest;
   const detector = new CoordinateAutoDetector({ continuous: true, minIntervalMs: 0 });
@@ -173,7 +315,9 @@ test('continuous reset invalidates in-flight work and clears the FIFO', async ()
     pendingFrames: 0,
     inFlight: undefined,
     queued: [],
+    queuedEntries: [],
     droppedCount: 0,
+    expiredCount: 0,
     lastAttemptAtMs: undefined,
     nextAllowedAtMs: undefined,
   });

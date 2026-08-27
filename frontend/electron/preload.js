@@ -13,6 +13,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     start: (region) => ipcRenderer.invoke('gps-watch:start', region),
     stop: () => ipcRenderer.invoke('gps-watch:stop'),
     status: () => ipcRenderer.invoke('gps-watch:status'),
+    updateStatus: (status) => ipcRenderer.invoke('gps-watch:update-status', status),
     showMain: () => ipcRenderer.invoke('gps-watch:show-main'),
     onEvent: (callback) => {
       const listener = (_event, payload) => callback(payload)

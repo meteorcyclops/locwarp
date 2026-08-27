@@ -240,6 +240,13 @@ let gpsWatchStdoutBuffer = ''
 let gpsWatchStopTimer = null
 let gpsWatchForceKillTimer = null
 let gpsWatchStartupTimer = null
+let gpsWatchBorderStatus = {
+  mode: 'latest',
+  queued: 0,
+  succeeded: 0,
+  skipped: 0,
+  framesSkipped: 0,
+}
 
 function sendGpsWatchEvent(payload) {
   if (mainWindow && !mainWindow.isDestroyed()) {
@@ -264,6 +271,38 @@ function resolveGpsWatchHelper() {
 function closeGpsWatchBorder() {
   if (gpsWatchBorderWindow && !gpsWatchBorderWindow.isDestroyed()) gpsWatchBorderWindow.close()
   gpsWatchBorderWindow = null
+}
+
+function normalizeGpsWatchCount(value) {
+  const number = Number(value)
+  if (!Number.isFinite(number)) return 0
+  return Math.max(0, Math.min(9999, Math.floor(number)))
+}
+
+function gpsWatchBorderLabel() {
+  const mode = gpsWatchBorderStatus.mode === 'complete' ? '完整' : '極速'
+  const frames = gpsWatchBorderStatus.framesSkipped > 0
+    ? ` · 幀 ${gpsWatchBorderStatus.framesSkipped}`
+    : ''
+  return `${mode} · 排 ${gpsWatchBorderStatus.queued} · 成 ${gpsWatchBorderStatus.succeeded} · 略 ${gpsWatchBorderStatus.skipped}${frames} · Esc`
+}
+
+function updateGpsWatchBorderStatus(status = {}) {
+  gpsWatchBorderStatus = {
+    mode: status.mode === 'complete' ? 'complete' : 'latest',
+    queued: normalizeGpsWatchCount(status.queued),
+    succeeded: normalizeGpsWatchCount(status.succeeded),
+    skipped: normalizeGpsWatchCount(status.skipped),
+    framesSkipped: normalizeGpsWatchCount(status.framesSkipped),
+  }
+  if (!gpsWatchBorderWindow || gpsWatchBorderWindow.isDestroyed()) return
+  const label = gpsWatchBorderLabel()
+  void gpsWatchBorderWindow.webContents.executeJavaScript(
+    `document.getElementById('gps-watch-status').textContent = ${JSON.stringify(label)}`,
+    true,
+  ).catch((error) => {
+    console.error('[gps-watch] failed to update border status:', error.message)
+  })
 }
 
 function showGpsWatchBorder(region) {
@@ -295,7 +334,7 @@ function showGpsWatchBorder(region) {
     html,body{margin:0;width:100%;height:100%;overflow:hidden;background:transparent}
     body{box-sizing:border-box;border:2px solid #4ecdc4;border-radius:8px;box-shadow:inset 0 0 0 1px rgba(255,255,255,.2),0 0 14px rgba(78,205,196,.55)}
     span{position:absolute;top:5px;left:7px;padding:3px 7px;border-radius:6px;background:rgba(8,18,25,.88);color:#dffefa;font:600 10px -apple-system,BlinkMacSystemFont,sans-serif;white-space:nowrap}
-  </style><span>LocWarp GPS 掃描中 · Esc 停止</span>`
+  </style><span id="gps-watch-status">${gpsWatchBorderLabel()}</span>`
   gpsWatchBorderWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`)
   gpsWatchBorderWindow.showInactive()
 }
@@ -311,6 +350,13 @@ function clearGpsWatchProcessState() {
   gpsWatchStdoutBuffer = ''
   gpsWatchState = 'idle'
   gpsWatchRegion = null
+  gpsWatchBorderStatus = {
+    mode: 'latest',
+    queued: 0,
+    succeeded: 0,
+    skipped: 0,
+    framesSkipped: 0,
+  }
   closeGpsWatchBorder()
   globalShortcut.unregister('Alt+Shift+G')
   globalShortcut.unregister('Escape')
@@ -608,6 +654,13 @@ ipcMain.handle('gps-watch:status', () => ({
   region: gpsWatchRegion,
   supported: process.platform === 'darwin',
 }))
+ipcMain.handle('gps-watch:update-status', (event, status) => {
+  if (!mainWindow || mainWindow.isDestroyed() || event.sender !== mainWindow.webContents) {
+    return { ok: false }
+  }
+  updateGpsWatchBorderStatus(status)
+  return { ok: true }
+})
 ipcMain.handle('gps-watch:show-main', () => {
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.show()
@@ -939,7 +992,7 @@ async function createWindow() {
         const u = new URL(details.url)
         if (OSM_HOSTS.includes(u.hostname)) {
           details.requestHeaders['User-Agent'] =
-            'LocWarp-koxuan/0.2.193-kx.7 (+https://github.com/meteorcyclops/locwarp)'
+            'LocWarp-koxuan/0.2.193-kx.8 (+https://github.com/meteorcyclops/locwarp)'
           details.requestHeaders['Referer'] = 'https://github.com/meteorcyclops/locwarp'
         }
       } catch {}

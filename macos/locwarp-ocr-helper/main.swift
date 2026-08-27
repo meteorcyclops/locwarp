@@ -10,7 +10,8 @@ import Vision
 // LocWarp's screen OCR helper is deliberately a small newline-delimited JSON
 // process. It never writes a captured frame to disk or sends a frame over the
 // wire: ScreenCaptureKit delivers a pixel buffer, Vision reads it, and the
-// pixel buffer is released after the delegate callback returns.
+// pixel buffer is retained only while one OCR is in flight or one latest frame
+// is waiting in memory. It is released when that work is finished or dropped.
 
 private let helperVersion = "1"
 
@@ -351,6 +352,98 @@ private struct OCRResult {
     let candidates: [OCRCandidate]
 }
 
+// ScreenCaptureKit can deliver frames faster than Vision can recognize them.
+// This mailbox deliberately keeps at most one waiting value. submit() is
+// constant-time and returns whether the caller needs to start the single
+// consumer task; the consumer remains marked busy until it observes an empty
+// mailbox. The lock protects both the value and the busy transition so a frame
+// arriving at the worker's boundary cannot strand a pending OCR.
+private final class LatestValueMailbox<Value>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var latest: Value?
+    private var processing = false
+    private var droppedCountValue = 0
+
+    @discardableResult
+    func submit(_ value: Value) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        if latest != nil { droppedCountValue += 1 }
+        latest = value
+        guard !processing else { return false }
+        processing = true
+        return true
+    }
+
+    func take() -> Value? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let latest else {
+            processing = false
+            return nil
+        }
+        self.latest = nil
+        return latest
+    }
+
+    func discardPending(resetDroppedCount: Bool = false) {
+        lock.lock()
+        let discarded = latest
+        latest = nil
+        if resetDroppedCount { droppedCountValue = 0 }
+        lock.unlock()
+        // Keep the replaced value alive until after the lock is released. A
+        // CVPixelBuffer normally has no callback into this object on release,
+        // but avoiding deallocation while holding the mailbox lock keeps that
+        // assumption out of the synchronization contract.
+        withExtendedLifetime(discarded) {}
+    }
+
+    var droppedCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return droppedCountValue
+    }
+
+    var hasPending: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return latest != nil
+    }
+
+    var isProcessing: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return processing
+    }
+}
+
+private struct PendingOCRFrame {
+    let pixelBuffer: CVPixelBuffer
+    let generation: UInt64
+    let frameNumber: Int
+    let recognitionLevel: VNRequestTextRecognitionLevel
+}
+
+private func latestValueMailboxSelfTest() -> Bool {
+    let mailbox = LatestValueMailbox<Int>()
+    guard mailbox.submit(1) else { return false }
+    guard !mailbox.submit(2), !mailbox.submit(3) else { return false }
+    guard mailbox.droppedCount == 2 else { return false }
+    guard mailbox.take() == 3 else { return false }
+    guard mailbox.take() == nil, !mailbox.isProcessing else { return false }
+    guard mailbox.submit(4) else { return false }
+    mailbox.discardPending(resetDroppedCount: true)
+    guard mailbox.take() == nil && mailbox.droppedCount == 0 else { return false }
+
+    // Model the important boundary where OCR already took the current frame,
+    // then a newer capture arrives while the worker is still marked busy.
+    let duringOCR = LatestValueMailbox<Int>()
+    guard duringOCR.submit(10), duringOCR.take() == 10 else { return false }
+    guard !duringOCR.submit(11), duringOCR.take() == 11 else { return false }
+    return duringOCR.take() == nil && !duringOCR.isProcessing
+}
+
 private struct OCRTextLine {
     let text: String
     let confidence: Float
@@ -485,12 +578,15 @@ private enum OCRRecognizer {
 private final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendable {
     private let emitter: JSONEmitter
     private let sampleQueue = DispatchQueue(label: "tw.xuan.locwarp.ocr.sample", qos: .userInitiated)
+    private let ocrQueue = DispatchQueue(label: "tw.xuan.locwarp.ocr.vision", qos: .userInitiated)
+    private let frameMailbox = LatestValueMailbox<PendingOCRFrame>()
     private let stateLock = NSLock()
     private var stream: SCStream?
     private var state = "idle"
     private var configuration = CaptureConfiguration.default
     private var selectedDisplayID: UInt32?
     private var frameNumber = 0
+    private var processedFrameCount = 0
     // A start/stop cycle owns one token. Incrementing it on either operation
     // makes every continuation from an older async start stale by definition.
     private var generation: UInt64 = 0
@@ -521,6 +617,8 @@ private final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegat
         streamGeneration = nil
         configuration = requestedConfiguration
         frameNumber = 0
+        processedFrameCount = 0
+        frameMailbox.discardPending(resetDroppedCount: true)
         stopRequested = false
         stateLock.unlock()
 
@@ -656,6 +754,7 @@ private final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegat
         if shutdown { shutdownAfterStop = true }
         let currentState = state
         if currentState == "idle" {
+            frameMailbox.discardPending()
             let shouldShutdown = shutdownAfterStop
             shutdownAfterStop = false
             stateLock.unlock()
@@ -664,12 +763,14 @@ private final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegat
             return
         }
         if currentState == "stopping" {
+            frameMailbox.discardPending()
             stateLock.unlock()
             return
         }
         state = "stopping"
         generation &+= 1
         stopRequested = true
+        frameMailbox.discardPending()
         let activeStream = stream
         stateLock.unlock()
 
@@ -700,11 +801,13 @@ private final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegat
         let currentState = state
         let currentConfiguration = configuration.dictionary
         let currentDisplayID = selectedDisplayID
+        let captureTelemetry = captureTelemetryLocked()
         stateLock.unlock()
         var output: [String: Any] = [
             "event": "status",
             "state": currentState,
-            "configuration": currentConfiguration
+            "configuration": currentConfiguration,
+            "capture": captureTelemetry
         ]
         if let currentDisplayID { output["displayID"] = currentDisplayID }
         emitter.emit(output)
@@ -716,42 +819,28 @@ private final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegat
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of outputType: SCStreamOutputType) {
         guard outputType == .screen, let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
-        stateLock.lock()
-        let currentGeneration = generation
-        let isCapturing = state == "running"
-            && !stopRequested
-            && streamGeneration == currentGeneration
-            && self.stream === stream
-        let currentConfiguration = configuration
-        let currentFrame: Int
-        if isCapturing {
-            frameNumber += 1
-            currentFrame = frameNumber
-        } else {
-            currentFrame = 0
-        }
-        stateLock.unlock()
-        guard isCapturing else { return }
 
-        autoreleasepool {
-            do {
-                let result = try OCRRecognizer.recognize(pixelBuffer: pixelBuffer, level: currentConfiguration.recognitionLevel)
-                DispatchQueue.main.async {
-                    guard self.isCurrentRunning(currentGeneration) else { return }
-                    self.emitter.emit([
-                        "event": "frame",
-                        "frame": currentFrame,
-                        "text": result.text,
-                        "texts": result.texts.map(\.dictionary),
-                        "candidates": result.candidates.map(\.dictionary)
-                    ])
-                }
-            } catch {
-                DispatchQueue.main.async {
-                    guard self.isCurrentRunning(currentGeneration) else { return }
-                    self.emitError(error, operation: "ocr", frame: currentFrame)
-                }
-            }
+        stateLock.lock()
+        guard state == "running",
+              !stopRequested,
+              streamGeneration == generation,
+              self.stream === stream else {
+            stateLock.unlock()
+            return
+        }
+        let pendingFrame = PendingOCRFrame(
+            pixelBuffer: pixelBuffer,
+            generation: generation,
+            frameNumber: frameNumber + 1,
+            recognitionLevel: configuration.recognitionLevel
+        )
+        frameNumber += 1
+        let shouldScheduleOCR = frameMailbox.submit(pendingFrame)
+        stateLock.unlock()
+
+        guard shouldScheduleOCR else { return }
+        ocrQueue.async { [weak self] in
+            self?.processPendingFrames()
         }
     }
 
@@ -776,6 +865,7 @@ private final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegat
             self.stream = nil
             self.streamGeneration = nil
             self.stopRequested = false
+            self.frameMailbox.discardPending()
             self.stateLock.unlock()
             if shouldReport {
                 self.emitError(error, operation: "capture")
@@ -881,11 +971,70 @@ private final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegat
         stream = nil
         streamGeneration = nil
         stopRequested = false
+        frameMailbox.discardPending()
         let shouldShutdown = shutdownAfterStop
         shutdownAfterStop = false
         stateLock.unlock()
         emitter.emit(["event": "stopped"])
         if shouldShutdown { stopMainRunLoop() }
+    }
+
+    private func processPendingFrames() {
+        while let frame = frameMailbox.take() {
+            guard beginOCR(for: frame) else { continue }
+
+            autoreleasepool {
+                do {
+                    let result = try OCRRecognizer.recognize(
+                        pixelBuffer: frame.pixelBuffer,
+                        level: frame.recognitionLevel
+                    )
+                    DispatchQueue.main.async {
+                        guard self.isCurrentRunning(frame.generation) else { return }
+                        var output: [String: Any] = [
+                            "event": "frame",
+                            "frame": frame.frameNumber,
+                            "text": result.text,
+                            "texts": result.texts.map(\.dictionary),
+                            "candidates": result.candidates.map(\.dictionary)
+                        ]
+                        self.stateLock.lock()
+                        let telemetry = self.captureTelemetryLocked()
+                        self.stateLock.unlock()
+                        for (key, value) in telemetry { output[key] = value }
+                        self.emitter.emit(output)
+                    }
+                } catch {
+                    DispatchQueue.main.async {
+                        guard self.isCurrentRunning(frame.generation) else { return }
+                        self.emitError(error, operation: "ocr", frame: frame.frameNumber)
+                    }
+                }
+            }
+        }
+    }
+
+    private func beginOCR(for frame: PendingOCRFrame) -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        guard generation == frame.generation,
+              state == "running",
+              !stopRequested,
+              streamGeneration == frame.generation else {
+            return false
+        }
+        processedFrameCount += 1
+        return true
+    }
+
+    private func captureTelemetryLocked() -> [String: Any] {
+        [
+            "capturedFrameCount": frameNumber,
+            "processedFrameCount": processedFrameCount,
+            "captureDroppedCount": frameMailbox.droppedCount,
+            "queuedFrameCount": frameMailbox.hasPending ? 1 : 0,
+            "ocrInFlight": frameMailbox.isProcessing
+        ]
     }
 
     private func emitError(_ error: Error, operation: String, frame: Int? = nil) {
@@ -1070,13 +1219,15 @@ private func runHelper() {
         if options.selfTest {
             let passed = CoordinateParser.selfTest()
             let scalePassed = scaleSelfTest()
+            let backpressurePassed = latestValueMailboxSelfTest()
             emitter.emit([
                 "event": "selfTest",
-                "passed": passed && scalePassed,
+                "passed": passed && scalePassed && backpressurePassed,
                 "parser": "decimal-latitude-longitude",
-                "scale": scalePassed
+                "scale": scalePassed,
+                "backpressure": backpressurePassed
             ])
-            Foundation.exit(passed && scalePassed ? 0 : 1)
+            Foundation.exit(passed && scalePassed && backpressurePassed ? 0 : 1)
         }
         if let fixturePath = options.fixturePath {
             try runFixture(path: fixturePath, level: options.configuration.recognitionLevel, emitter: emitter)

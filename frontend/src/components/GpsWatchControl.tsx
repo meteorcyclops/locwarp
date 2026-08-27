@@ -13,6 +13,42 @@ type WatchPhase =
   | 'ambiguous'
   | 'error'
 
+type GpsQueuePolicy = 'latest' | 'complete'
+
+interface WatchStats {
+  queued: number
+  succeeded: number
+  dropped: number
+  expired: number
+  framesSkipped: number
+}
+
+const GPS_QUEUE_POLICY_KEY = 'locwarp.gps_watch_queue_policy'
+const EMPTY_STATS: WatchStats = { queued: 0, succeeded: 0, dropped: 0, expired: 0, framesSkipped: 0 }
+
+const storedQueuePolicy = (): GpsQueuePolicy => {
+  try {
+    return localStorage.getItem(GPS_QUEUE_POLICY_KEY) === 'complete' ? 'complete' : 'latest'
+  } catch {
+    return 'latest'
+  }
+}
+
+const createDetector = (queuePolicy: GpsQueuePolicy) => new CoordinateAutoDetector({
+  stabilityFrames: 2,
+  distanceMeters: 20,
+  roundDecimals: 5,
+  minIntervalMs: 450,
+  continuous: true,
+  queuePolicy,
+  queueMaxAgeMs: 3000,
+  // Vision supplies a confidence score for every parsed coordinate. Keep
+  // automatic teleports conservative so low-confidence OCR cannot move a
+  // device just because the watcher is running in the faster mode.
+  minConfidence: 0.9,
+  requireConfidence: true,
+})
+
 interface Props {
   isConnected: boolean
   isRouteRunning: boolean
@@ -42,18 +78,9 @@ const GpsWatchControl: React.FC<Props> = ({
   const [detail, setDetail] = useState('框選畫面上的 GPS，自動瞬移')
   const [ambiguous, setAmbiguous] = useState<Coordinate[]>([])
   const [lastCoordinate, setLastCoordinate] = useState<Coordinate | null>(null)
-  const detectorRef = useRef(new CoordinateAutoDetector({
-    stabilityFrames: 2,
-    distanceMeters: 20,
-    roundDecimals: 5,
-    minIntervalMs: 450,
-    continuous: true,
-    // Vision supplies a confidence score for every parsed coordinate.  Keep
-    // automatic teleports conservative; ambiguous/low-confidence OCR stays
-    // visible to the user but cannot move the device.
-    minConfidence: 0.9,
-    requireConfidence: true,
-  }))
+  const [queuePolicy, setQueuePolicy] = useState<GpsQueuePolicy>(storedQueuePolicy)
+  const [stats, setStats] = useState<WatchStats>(EMPTY_STATS)
+  const detectorRef = useRef(createDetector(queuePolicy))
   const teleportRef = useRef(onTeleport)
   const connectedRef = useRef(isConnected)
   const routeRunningRef = useRef(isRouteRunning)
@@ -61,11 +88,42 @@ const GpsWatchControl: React.FC<Props> = ({
   const sessionRef = useRef(0)
   const targetUdidRef = useRef<string | null>(null)
   const ignoreStoppedRef = useRef(false)
-  const droppedCountRef = useRef(0)
+  const queuePolicyRef = useRef<GpsQueuePolicy>(queuePolicy)
+  const statsRef = useRef<WatchStats>(EMPTY_STATS)
+  const lastPublishedStatusRef = useRef('')
 
   useEffect(() => { teleportRef.current = onTeleport }, [onTeleport])
   useEffect(() => { connectedRef.current = isConnected }, [isConnected])
   useEffect(() => { routeRunningRef.current = isRouteRunning }, [isRouteRunning])
+
+  const publishStats = useCallback((patch: Partial<WatchStats> = {}) => {
+    const snapshot = detectorRef.current.getSnapshot()
+    const next: WatchStats = {
+      ...statsRef.current,
+      ...patch,
+      queued: patch.queued ?? snapshot.queued.length,
+    }
+    statsRef.current = next
+    setStats(next)
+    const payload = {
+      mode: queuePolicyRef.current,
+      queued: next.queued,
+      succeeded: next.succeeded,
+      skipped: next.dropped + next.expired,
+      framesSkipped: next.framesSkipped,
+    }
+    const signature = JSON.stringify(payload)
+    if (signature === lastPublishedStatusRef.current) return
+    lastPublishedStatusRef.current = signature
+    void window.electronAPI?.gpsWatch?.updateStatus(payload).catch(() => {})
+  }, [])
+
+  const changeQueuePolicy = useCallback((next: GpsQueuePolicy) => {
+    queuePolicyRef.current = next
+    setQueuePolicy(next)
+    detectorRef.current = createDetector(next)
+    try { localStorage.setItem(GPS_QUEUE_POLICY_KEY, next) } catch { /* ignore */ }
+  }, [])
 
   const stop = useCallback(async (reveal = false, resetUi = true) => {
     stoppingRef.current = true
@@ -138,11 +196,11 @@ const GpsWatchControl: React.FC<Props> = ({
           ? event.candidates
           : (event.texts ?? [])
         const result = detectorRef.current.observe(frameInput)
-        if (result.droppedCount > droppedCountRef.current) {
-          const dropped = result.droppedCount - droppedCountRef.current
-          droppedCountRef.current = result.droppedCount
-          onShowToast(`GPS 連續掃描速度過快，已略過 ${dropped} 筆較舊座標`, 5000)
-        }
+        publishStats({
+          dropped: result.droppedCount,
+          expired: result.expiredCount ?? 0,
+          framesSkipped: event.captureDroppedCount ?? statsRef.current.framesSkipped,
+        })
         if (result.phase === 'baseline') {
           setPhase('watching')
           setDetail(`監看中 · 已略過目前 ${result.candidates.length} 筆座標`)
@@ -186,6 +244,7 @@ const GpsWatchControl: React.FC<Props> = ({
         void teleportRef.current(coordinate, sessionTarget).then(() => {
           if (session !== sessionRef.current || stoppingRef.current) return
           detectorRef.current.markSucceeded(attemptId)
+          publishStats({ succeeded: statsRef.current.succeeded + 1 })
           setLastCoordinate(coordinate)
           setPhase('watching')
           setDetail(`監看中 · 上次 ${formatCoordinate(coordinate)}`)
@@ -215,7 +274,7 @@ const GpsWatchControl: React.FC<Props> = ({
         setDetail(event.reason === 'hotkey' ? '已由快捷鍵停止 GPS 監看' : 'GPS 畫面監看已停止')
       }
     })
-  }, [onShowToast, stop])
+  }, [onShowToast, publishStats, stop])
 
   useEffect(() => {
     void window.electronAPI?.gpsWatch?.status().then((status) => {
@@ -276,8 +335,11 @@ const GpsWatchControl: React.FC<Props> = ({
     const session = sessionRef.current + 1
     sessionRef.current = session
     targetUdidRef.current = targetUdid
-    droppedCountRef.current = 0
-    detectorRef.current.reset()
+    detectorRef.current = createDetector(queuePolicyRef.current)
+    statsRef.current = EMPTY_STATS
+    setStats(EMPTY_STATS)
+    lastPublishedStatusRef.current = ''
+    publishStats(EMPTY_STATS)
     setAmbiguous([])
     setPhase('selecting')
     setDetail('請在畫面上拖曳 GPS 感應區')
@@ -342,9 +404,26 @@ const GpsWatchControl: React.FC<Props> = ({
 
   const active = phase !== 'idle' && phase !== 'error' && phase !== 'ambiguous'
   const unavailable = window.electronAPI?.platform !== 'darwin'
+  const skipped = stats.dropped + stats.expired
 
   return (
     <div className={`gps-watch-control phase-${phase}`}>
+      <div className="gps-watch-mode" aria-label="GPS 掃描模式">
+        <button
+          className={queuePolicy === 'latest' ? 'selected' : ''}
+          disabled={active}
+          aria-pressed={queuePolicy === 'latest'}
+          onClick={() => changeQueuePolicy('latest')}
+          title="只保留最新穩定座標；舊座標 3 秒後過期"
+        >極速</button>
+        <button
+          className={queuePolicy === 'complete' ? 'selected' : ''}
+          disabled={active}
+          aria-pressed={queuePolicy === 'complete'}
+          onClick={() => changeQueuePolicy('complete')}
+          title="依序處理 3 秒內出現的所有穩定座標"
+        >完整</button>
+      </div>
       <button
         className={`gps-watch-button${active ? ' active' : ''}`}
         onClick={() => { active ? void stop(false) : void start() }}
@@ -361,6 +440,15 @@ const GpsWatchControl: React.FC<Props> = ({
       </button>
       <div className="gps-watch-detail">
         <span>{detail}</span>
+        {active && (
+          <span className="gps-watch-stats">
+            <b>{queuePolicy === 'latest' ? '極速' : '完整'}</b>
+            <em>排 {stats.queued}</em>
+            <em>成 {stats.succeeded}</em>
+            <em>略 {skipped}</em>
+            {stats.framesSkipped > 0 && <em>幀 {stats.framesSkipped}</em>}
+          </span>
+        )}
         {lastCoordinate && phase === 'idle' && (
           <code>{formatCoordinate(lastCoordinate)}</code>
         )}

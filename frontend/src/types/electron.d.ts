@@ -51,6 +51,7 @@ export interface GpsWatchEvent {
     confidence?: number
     boundingBox?: number[]
   }>
+  captureDroppedCount?: number
 }
 
 declare global {
@@ -68,6 +69,13 @@ declare global {
         start(region: GpsWatchRegion): Promise<{ ok: boolean; code?: string; state?: string; helper?: string }>
         stop(): Promise<{ ok: boolean; state?: string }>
         status(): Promise<{ state: string; region: GpsWatchRegion | null; supported: boolean }>
+        updateStatus(status: {
+          mode: 'latest' | 'complete'
+          queued: number
+          succeeded: number
+          skipped: number
+          framesSkipped?: number
+        }): Promise<{ ok: boolean }>
         showMain(): Promise<{ ok: boolean }>
         onEvent(callback: (event: GpsWatchEvent) => void): () => void
       }

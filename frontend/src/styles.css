@@ -1162,8 +1162,42 @@ textarea:focus {
 
 .gps-watch-button,
 .gps-watch-detail,
+.gps-watch-mode,
 .gps-watch-ambiguous {
   pointer-events: auto;
+}
+
+.gps-watch-mode {
+  padding: 3px;
+  display: inline-flex;
+  gap: 2px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 9px;
+  background: rgba(12, 15, 25, 0.88);
+  box-shadow: 0 4px 14px rgba(6, 10, 24, 0.28);
+}
+
+.gps-watch-mode button {
+  min-width: 42px;
+  padding: 4px 8px;
+  color: #8791af;
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  font-size: 10px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.gps-watch-mode button.selected {
+  color: #dffefa;
+  background: rgba(78, 205, 196, 0.18);
+  box-shadow: inset 0 0 0 1px rgba(78, 205, 196, 0.24);
+}
+
+.gps-watch-mode button:disabled {
+  cursor: default;
+  opacity: 0.62;
 }
 
 .gps-watch-button {
@@ -1244,6 +1278,27 @@ textarea:focus {
   margin-top: 2px;
   color: #9ee9e1;
   font-size: 10px;
+}
+
+.gps-watch-stats {
+  margin-top: 4px;
+  display: flex;
+  justify-content: flex-end;
+  gap: 5px;
+  color: #8e99b8;
+}
+
+.gps-watch-stats b,
+.gps-watch-stats em {
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.055);
+  font-style: normal;
+  font-weight: 600;
+}
+
+.gps-watch-stats b {
+  color: #8ee4dc;
 }
 
 .phase-error .gps-watch-button,
