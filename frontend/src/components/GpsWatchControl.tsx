@@ -39,6 +39,10 @@ const storedQueuePolicy = (): GpsQueuePolicy => {
 
 const createDetector = (queuePolicy: GpsQueuePolicy) => new CoordinateAutoDetector({
   stabilityFrames: 2,
+  // A screen-watch session is explicitly started by the user. Let its first
+  // stable OCR coordinate trigger after the same two-frame safety gate; the
+  // detector's default remains the conservative first-frame baseline.
+  triggerInitialCandidate: true,
   distanceMeters: 20,
   roundDecimals: 5,
   minIntervalMs: GPS_WATCH_MIN_INTERVAL_MS,
@@ -78,7 +82,7 @@ const GpsWatchControl: React.FC<Props> = ({
   onShowToast,
 }) => {
   const [phase, setPhase] = useState<WatchPhase>('idle')
-  const [detail, setDetail] = useState('框選畫面上的 GPS，自動瞬移')
+  const [detail, setDetail] = useState('支援十進位、度分、度分秒，自動轉換')
   const [ambiguous, setAmbiguous] = useState<Coordinate[]>([])
   const [lastCoordinate, setLastCoordinate] = useState<Coordinate | null>(null)
   const [queuePolicy, setQueuePolicy] = useState<GpsQueuePolicy>(storedQueuePolicy)
@@ -148,7 +152,7 @@ const GpsWatchControl: React.FC<Props> = ({
       stoppingRef.current = false
       if (resetUi) {
         setPhase('idle')
-        setDetail('框選畫面上的 GPS，自動瞬移')
+        setDetail('支援十進位、度分、度分秒，自動轉換')
       }
     }
   }, [])
@@ -191,8 +195,8 @@ const GpsWatchControl: React.FC<Props> = ({
       }
       if (event.event === 'started') {
         if (stoppingRef.current) return
-        setPhase('baseline')
-        setDetail('建立畫面基線中，目前座標不會觸發')
+        setPhase('watching')
+        setDetail('辨識中 · 第一筆座標也會在連續兩幀確認後瞬移')
         return
       }
       if (event.event === 'frame') {

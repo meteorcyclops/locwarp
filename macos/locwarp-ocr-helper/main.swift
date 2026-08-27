@@ -300,6 +300,17 @@ private func inferredDisplayScale(pixelWidth: Double, pixelHeight: Double, logic
     return max(1, pixelWidth / logicalWidth, pixelHeight / logicalHeight)
 }
 
+private func smallTextOutputScale(pixelWidth: Int, pixelHeight: Int) -> Double {
+    guard pixelWidth > 0, pixelHeight > 0 else { return 1 }
+    // Upscaling compact ROIs materially improves Vision's recognition of
+    // degree/prime glyphs. Keep the workload bounded for large selections.
+    let width = Double(pixelWidth)
+    let height = Double(pixelHeight)
+    let areaScale = sqrt(3_000_000 / (width * height))
+    let dimensionScale = 4096 / max(width, height)
+    return max(1, min(1.5, areaScale, dimensionScale))
+}
+
 private func printHelpAndExit() -> Never {
     let help = """
     LocWarp OCR helper \(helperVersion)
@@ -464,31 +475,50 @@ private struct OCRTextLine {
 }
 
 private enum CoordinateParser {
-    // Decimal latitude, longitude only. Keeping this intentionally strict is
-    // safer than guessing at OCR output that might be a postal number.
-    private static let regex = try! NSRegularExpression(
+    // Directional formats require explicit latitude/longitude hemispheres so
+    // DMS/DM values cannot be assembled from unrelated numbers on the screen.
+    // Plain decimal coordinates retain the existing comma requirement.
+    private static let dmsRegex = try! NSRegularExpression(
+        pattern: #"(?<![0-9.])([+-]?\d{1,2})\s*°\s*(\d{1,2})\s*'\s*(\d{1,2}(?:\.\d+)?)\s*"\s*([NS])(?:\s*[,;]\s*|\s+)([+-]?\d{1,3})\s*°\s*(\d{1,2})\s*'\s*(\d{1,2}(?:\.\d+)?)\s*"\s*([EW])(?![A-Z])"#,
+        options: [.caseInsensitive]
+    )
+    private static let dmRegex = try! NSRegularExpression(
+        pattern: #"(?<![0-9.])([+-]?\d{1,2})\s*°\s*(\d{1,2}(?:\.\d+)?)\s*'\s*([NS])(?:\s*[,;]\s*|\s+)([+-]?\d{1,3})\s*°\s*(\d{1,2}(?:\.\d+)?)\s*'\s*([EW])(?![A-Z])"#,
+        options: [.caseInsensitive]
+    )
+    private static let directionalDecimalRegex = try! NSRegularExpression(
+        pattern: #"(?<![0-9.])([+-]?(?:\d+\.\d+|\.\d+))\s*°?\s*([NS])(?:\s*[,;]\s*|\s+)([+-]?(?:\d+\.\d+|\.\d+))\s*°?\s*([EW])(?![A-Z])"#,
+        options: [.caseInsensitive]
+    )
+    private static let decimalRegex = try! NSRegularExpression(
         pattern: "(?<![0-9.])([+-]?(?:\\d+\\.\\d+|\\.\\d+))\\s*[,，]\\s*([+-]?(?:\\d+\\.\\d+|\\.\\d+))(?![0-9.])",
         options: []
     )
 
     static func candidates(in text: String, confidence: Float = 0, boundingBox: CGRect = .zero) -> [OCRCandidate] {
         let normalized = text
+            .applyingTransform(.fullwidthToHalfwidth, reverse: false) ?? text
+        let canonical = normalized
             .replacingOccurrences(of: "−", with: "-")
             .replacingOccurrences(of: "–", with: "-")
             .replacingOccurrences(of: "，", with: ",")
-        let range = NSRange(normalized.startIndex..<normalized.endIndex, in: normalized)
+            .replacingOccurrences(of: "；", with: ";")
+            .replacingOccurrences(of: "º", with: "°")
+            .replacingOccurrences(of: "˚", with: "°")
+            .replacingOccurrences(of: "′", with: "'")
+            .replacingOccurrences(of: "’", with: "'")
+            .replacingOccurrences(of: "‘", with: "'")
+            .replacingOccurrences(of: "″", with: "\"")
+            .replacingOccurrences(of: "“", with: "\"")
+            .replacingOccurrences(of: "”", with: "\"")
+        let range = NSRange(canonical.startIndex..<canonical.endIndex, in: canonical)
         var result: [OCRCandidate] = []
         var seen = Set<String>()
-        regex.enumerateMatches(in: normalized, options: [], range: range) { match, _, _ in
-            guard let match,
-                  let latitudeRange = Range(match.range(at: 1), in: normalized),
-                  let longitudeRange = Range(match.range(at: 2), in: normalized),
-                  let latitude = Double(normalized[latitudeRange]),
-                  let longitude = Double(normalized[longitudeRange]),
-                  latitude.isFinite, longitude.isFinite,
-                  abs(latitude) <= 90, abs(longitude) <= 180 else {
-                return
-            }
+
+        func append(_ coordinate: (latitude: Double, longitude: Double)?) {
+            guard let coordinate else { return }
+            let latitude = coordinate.latitude
+            let longitude = coordinate.longitude
             let key = String(format: "%.7f,%.7f", latitude, longitude)
             guard seen.insert(key).inserted else { return }
             result.append(OCRCandidate(
@@ -499,14 +529,131 @@ private enum CoordinateParser {
                 boundingBox: boundingBox
             ))
         }
+
+        dmsRegex.enumerateMatches(in: canonical, options: [], range: range) { match, _, _ in
+            guard let match else { return }
+            append(directionalCoordinate(
+                in: canonical,
+                match: match,
+                latitude: (1, 2, 3, 4),
+                longitude: (5, 6, 7, 8)
+            ))
+        }
+        dmRegex.enumerateMatches(in: canonical, options: [], range: range) { match, _, _ in
+            guard let match else { return }
+            append(directionalCoordinate(
+                in: canonical,
+                match: match,
+                latitude: (1, 2, nil, 3),
+                longitude: (4, 5, nil, 6)
+            ))
+        }
+        directionalDecimalRegex.enumerateMatches(in: canonical, options: [], range: range) { match, _, _ in
+            guard let match else { return }
+            append(directionalCoordinate(
+                in: canonical,
+                match: match,
+                latitude: (1, nil, nil, 2),
+                longitude: (3, nil, nil, 4)
+            ))
+        }
+        decimalRegex.enumerateMatches(in: canonical, options: [], range: range) { match, _, _ in
+            guard let match,
+                  let latitude = number(in: canonical, match: match, group: 1),
+                  let longitude = number(in: canonical, match: match, group: 2),
+                  latitude.isFinite, longitude.isFinite,
+                  abs(latitude) <= 90, abs(longitude) <= 180 else { return }
+            append((latitude, longitude))
+        }
         return result
+    }
+
+    private static func capture(in text: String, match: NSTextCheckingResult, group: Int) -> String? {
+        let captureRange = match.range(at: group)
+        guard captureRange.location != NSNotFound,
+              let range = Range(captureRange, in: text) else { return nil }
+        return String(text[range])
+    }
+
+    private static func number(in text: String, match: NSTextCheckingResult, group: Int) -> Double? {
+        guard let token = capture(in: text, match: match, group: group),
+              let value = Double(token), value.isFinite else { return nil }
+        return value
+    }
+
+    private static func directionalValue(
+        degreeToken: String,
+        minutes: Double?,
+        seconds: Double?,
+        hemisphere: String,
+        maximum: Double
+    ) -> Double? {
+        guard let degrees = Double(degreeToken), degrees.isFinite else { return nil }
+        let minutesValue = minutes ?? 0
+        let secondsValue = seconds ?? 0
+        guard minutesValue.isFinite, secondsValue.isFinite,
+              minutesValue >= 0, minutesValue < 60,
+              secondsValue >= 0, secondsValue < 60 else { return nil }
+
+        let direction = hemisphere.uppercased()
+        let isNegativeDirection = direction == "S" || direction == "W"
+        let explicitlyNegative = degreeToken.hasPrefix("-")
+        let explicitlyPositive = degreeToken.hasPrefix("+")
+        if explicitlyNegative && !isNegativeDirection { return nil }
+        if explicitlyPositive && isNegativeDirection { return nil }
+
+        let magnitude = abs(degrees) + minutesValue / 60 + secondsValue / 3600
+        guard magnitude <= maximum else { return nil }
+        return isNegativeDirection ? -magnitude : magnitude
+    }
+
+    private static func directionalCoordinate(
+        in text: String,
+        match: NSTextCheckingResult,
+        latitude: (degrees: Int, minutes: Int?, seconds: Int?, hemisphere: Int),
+        longitude: (degrees: Int, minutes: Int?, seconds: Int?, hemisphere: Int)
+    ) -> (latitude: Double, longitude: Double)? {
+        guard let latitudeDegrees = capture(in: text, match: match, group: latitude.degrees),
+              let latitudeHemisphere = capture(in: text, match: match, group: latitude.hemisphere),
+              let longitudeDegrees = capture(in: text, match: match, group: longitude.degrees),
+              let longitudeHemisphere = capture(in: text, match: match, group: longitude.hemisphere) else {
+            return nil
+        }
+        let latitudeMinutes = latitude.minutes.flatMap { number(in: text, match: match, group: $0) }
+        let latitudeSeconds = latitude.seconds.flatMap { number(in: text, match: match, group: $0) }
+        let longitudeMinutes = longitude.minutes.flatMap { number(in: text, match: match, group: $0) }
+        let longitudeSeconds = longitude.seconds.flatMap { number(in: text, match: match, group: $0) }
+        if latitude.minutes != nil && latitudeMinutes == nil { return nil }
+        if latitude.seconds != nil && latitudeSeconds == nil { return nil }
+        if longitude.minutes != nil && longitudeMinutes == nil { return nil }
+        if longitude.seconds != nil && longitudeSeconds == nil { return nil }
+
+        guard let latitudeValue = directionalValue(
+                  degreeToken: latitudeDegrees,
+                  minutes: latitudeMinutes,
+                  seconds: latitudeSeconds,
+                  hemisphere: latitudeHemisphere,
+                  maximum: 90
+              ),
+              let longitudeValue = directionalValue(
+                  degreeToken: longitudeDegrees,
+                  minutes: longitudeMinutes,
+                  seconds: longitudeSeconds,
+                  hemisphere: longitudeHemisphere,
+                  maximum: 180
+              ) else { return nil }
+        return (latitudeValue, longitudeValue)
     }
 
     static func selfTest() -> Bool {
         let cases: [(String, Double, Double)] = [
             ("28.647615,77.189494", 28.647615, 77.189494),
             ("41.8243328138, -71.4662015811", 41.8243328138, -71.4662015811),
-            ("49.346681，9.129642", 49.346681, 9.129642)
+            ("49.346681，9.129642", 49.346681, 9.129642),
+            ("39°00'19.7\"N 84°36'21.9\"W", 39.0054722222, -84.6060833333),
+            ("39º00′19.7″N，84˚36′21.9″W", 39.0054722222, -84.6060833333),
+            ("39°0.3283′N, 84°36.365′W", 39.0054716667, -84.6060833333),
+            ("39.005472°N, 84.606083°W", 39.005472, -84.606083)
         ]
         for (text, expectedLatitude, expectedLongitude) in cases {
             guard let candidate = candidates(in: text).first,
@@ -518,6 +665,11 @@ private enum CoordinateParser {
         return candidates(in: "128.0, 190.0").isEmpty
             && candidates(in: "postal 12345").isEmpty
             && candidates(in: "25,121").isEmpty
+            && candidates(in: "39°60'0\"N 84°0'0\"W").isEmpty
+            && candidates(in: "39°0'60\"N 84°0'0\"W").isEmpty
+            && candidates(in: "39°0'0\"E 84°0'0\"N").isEmpty
+            && candidates(in: "-39°0'0\"N 84°0'0\"W").isEmpty
+            && candidates(in: "+39°0'0\"S 84°0'0\"W").isEmpty
     }
 }
 
@@ -525,9 +677,19 @@ private func scaleSelfTest() -> Bool {
     abs(inferredDisplayScale(pixelWidth: 1920, pixelHeight: 1080, logicalWidth: 1920, logicalHeight: 1080) - 1) < 0.0001
         && abs(inferredDisplayScale(pixelWidth: 3024, pixelHeight: 1964, logicalWidth: 1512, logicalHeight: 982) - 2) < 0.0001
         && inferredDisplayScale(pixelWidth: 0, pixelHeight: 0, logicalWidth: 1512, logicalHeight: 982) == 1
+        && abs(smallTextOutputScale(pixelWidth: 1200, pixelHeight: 600) - 1.5) < 0.0001
+        && smallTextOutputScale(pixelWidth: 2400, pixelHeight: 1200) > 1
+        && smallTextOutputScale(pixelWidth: 3000, pixelHeight: 2000) == 1
 }
 
 private enum OCRRecognizer {
+    static func configurationSelfTest() -> Bool {
+        let request = makeRequest(level: .accurate)
+        return request.recognitionLevel == .accurate
+            && abs(request.minimumTextHeight - 0.005) < 0.000001
+            && request.usesLanguageCorrection == false
+    }
+
     static func recognize(pixelBuffer: CVPixelBuffer, level: VNRequestTextRecognitionLevel) throws -> OCRResult {
         let request = makeRequest(level: level)
         let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .up, options: [:])
@@ -547,7 +709,10 @@ private enum OCRRecognizer {
         request.recognitionLevel = level
         request.recognitionLanguages = ["en-US"]
         request.usesLanguageCorrection = false
-        request.minimumTextHeight = 0.01
+        // The selected ROI is already cropped and captured at Retina scale.
+        // Accept glyphs down to 0.5% of the ROI height so compact coordinate
+        // rows remain visible without weakening confidence/two-frame gates.
+        request.minimumTextHeight = 0.005
         return request
     }
 
@@ -932,6 +1097,12 @@ private final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegat
             guard !clipped.isNull, clipped.width >= 1, clipped.height >= 1 else {
                 throw HelperError.invalidROI("ROI does not intersect the selected display.")
             }
+            let nativePixelWidth = max(1, Int(ceil(clipped.width * roiScale)))
+            let nativePixelHeight = max(1, Int(ceil(clipped.height * roiScale)))
+            let textScale = smallTextOutputScale(
+                pixelWidth: nativePixelWidth,
+                pixelHeight: nativePixelHeight
+            )
             sourceRect = clipped
             outputROI = [
                 "x": Double(clipped.origin.x),
@@ -940,15 +1111,16 @@ private final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegat
                 "height": Double(clipped.height),
                 "units": "points",
                 "requestedUnits": roi.units.rawValue,
-                "scale": roiScale
+                "scale": roiScale,
+                "ocrScale": roiScale * textScale
             ]
             return ResolvedCapture(
                 configuration: requested,
                 sourceRect: sourceRect,
                 outputROI: outputROI,
                 scale: roiScale,
-                pixelWidth: max(1, Int(ceil(clipped.width * roiScale))),
-                pixelHeight: max(1, Int(ceil(clipped.height * roiScale)))
+                pixelWidth: max(1, Int(ceil(Double(nativePixelWidth) * textScale))),
+                pixelHeight: max(1, Int(ceil(Double(nativePixelHeight) * textScale)))
             )
         }
 
@@ -1225,14 +1397,16 @@ private func runHelper() {
             let passed = CoordinateParser.selfTest()
             let scalePassed = scaleSelfTest()
             let backpressurePassed = latestValueMailboxSelfTest()
+            let smallTextPassed = OCRRecognizer.configurationSelfTest()
             emitter.emit([
                 "event": "selfTest",
-                "passed": passed && scalePassed && backpressurePassed,
-                "parser": "decimal-latitude-longitude",
+                "passed": passed && scalePassed && backpressurePassed && smallTextPassed,
+                "parser": "dd-dm-dms-latitude-longitude",
                 "scale": scalePassed,
-                "backpressure": backpressurePassed
+                "backpressure": backpressurePassed,
+                "smallText": smallTextPassed
             ])
-            Foundation.exit(passed && scalePassed && backpressurePassed ? 0 : 1)
+            Foundation.exit(passed && scalePassed && backpressurePassed && smallTextPassed ? 0 : 1)
         }
         if let fixturePath = options.fixturePath {
             try runFixture(path: fixturePath, level: options.configuration.recognitionLevel, emitter: emitter)
@@ -1249,7 +1423,8 @@ private func runHelper() {
                 "visionOCR",
                 "displayID",
                 "roi",
-                "retina"
+                "retina",
+                "coordinateFormats:dd-dm-dms"
             ],
             "fps": ["min": 5, "max": 8, "default": 6]
         ])

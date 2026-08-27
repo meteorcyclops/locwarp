@@ -150,12 +150,198 @@ export function dedupeCoordinates(
   return result
 }
 
-// Decimal is required on both numbers.  The separator deliberately permits
-// labels/newlines/CJK and signs that are not part of a number, while stopping
-// before the next decimal token.  Using a fresh RegExp in the function keeps
-// parsing free of shared `lastIndex` state and therefore safe for concurrent
-// OCR calls.
-const COORD_DECIMAL_RE_SOURCE = '(?<![\\d.])([+-]?\\d+\\.\\d+)(?![\\d.])(?:(?![+-]?\\d+\\.\\d+)[^\\d.])*?([+-]?\\d+\\.\\d+)(?![\\d.])'
+type CoordinateAxis = 'latitude' | 'longitude'
+type CoordinateHemisphere = 'N' | 'S' | 'E' | 'W'
+
+interface ParsedCoordinateMatch {
+  coordinate: Coordinate
+  start: number
+  end: number
+}
+
+// The screen watcher receives OCR text, not the backend's already-normalized
+// Coordinate object.  Keep the grammar explicit for the structured formats so
+// a degree/minute/second sequence cannot accidentally be interpreted as two
+// unrelated decimal numbers.  DMS/DM are intentionally matched before DD and
+// their occupied ranges are excluded from the decimal pass below.
+const COORD_UNSIGNED_NUMBER_SOURCE = '(?:\\d+(?:\\.\\d+)?|\\.\\d+)'
+const COORD_NUMBER_SOURCE = `[+-]?${COORD_UNSIGNED_NUMBER_SOURCE}`
+const COORD_DMS_RE = new RegExp(
+  `(?<![\\d.])([+-]?\\d{1,3})\\s*°\\s*(\\d{1,2})\\s*'\\s*(\\d+(?:\\.\\d+)?)\\s*"\\s*([NS])?\\s*([,;\\s]+)\\s*([+-]?\\d{1,3})\\s*°\\s*(\\d{1,2})\\s*'\\s*(\\d+(?:\\.\\d+)?)\\s*"\\s*([EW])?(?![\\d.])`,
+  'giu',
+)
+const COORD_DM_RE = new RegExp(
+  `(?<![\\d.])([+-]?\\d{1,3})\\s*°\\s*(${COORD_UNSIGNED_NUMBER_SOURCE})\\s*'\\s*([NS])?\\s*([,;\\s]+)\\s*([+-]?\\d{1,3})\\s*°\\s*(${COORD_UNSIGNED_NUMBER_SOURCE})\\s*'\\s*([EW])?(?![\\d.])`,
+  'giu',
+)
+const COORD_DD_RE = new RegExp(
+  `(?<![\\d.])(${COORD_NUMBER_SOURCE})(?:\\s*(°)\\s*)?([NS])?\\s*([,;\\s]+)\\s*(${COORD_NUMBER_SOURCE})(?:\\s*(°)\\s*)?([EW])?(?![\\d.])`,
+  'giu',
+)
+
+// Decimal is required on both numbers for this deliberately broad fallback.
+// It preserves support for OCR labels/newlines/CJK around an ordinary decimal
+// pair, while the structured passes above handle symbols and hemispheres.
+const COORD_DECIMAL_FALLBACK_RE_SOURCE = '(?<![\\d.])([+-]?\\d+\\.\\d+)(?![\\d.])(?:(?![+-]?\\d+\\.\\d+)[^\\d.])*?([+-]?\\d+\\.\\d+)(?![\\d.])'
+
+function normalizeCoordinateText(raw: string): string {
+  // NFKC covers full-width digits/punctuation. The explicit replacements also
+  // cover common Vision variants that are not consistently folded by NFKC.
+  return raw
+    .replace(/[º˚]/g, '°')
+    .replace(/[″“”]/g, '"')
+    .replace(/[′‘’]/g, "'")
+    .normalize('NFKC')
+    .replace(/[−﹣－]/g, '-')
+    .replace(/[′‘’]/g, "'")
+    // NFKC expands U+2033 DOUBLE PRIME into two U+2032 PRIME characters.
+    .replace(/'{2}/g, '"')
+    .replace(/，/g, ',')
+}
+
+function hemisphereIsNegative(hemisphere: CoordinateHemisphere): boolean {
+  return hemisphere === 'S' || hemisphere === 'W'
+}
+
+function isHemisphereForAxis(
+  hemisphere: CoordinateHemisphere | undefined,
+  axis: CoordinateAxis,
+): boolean {
+  if (!hemisphere) return true
+  return axis === 'latitude'
+    ? hemisphere === 'N' || hemisphere === 'S'
+    : hemisphere === 'E' || hemisphere === 'W'
+}
+
+function parseAnglePart(
+  degreeText: string,
+  minutes = 0,
+  seconds = 0,
+  hemisphere: CoordinateHemisphere | undefined,
+  axis: CoordinateAxis,
+): number | undefined {
+  const degrees = Number(degreeText)
+  if (!Number.isInteger(degrees) || !Number.isFinite(minutes) || !Number.isFinite(seconds)) return undefined
+  if (minutes < 0 || minutes >= 60 || seconds < 0 || seconds >= 60) return undefined
+  if (!isHemisphereForAxis(hemisphere, axis)) return undefined
+
+  const maximum = axis === 'latitude' ? 90 : 180
+  const magnitude = Math.abs(degrees) + minutes / 60 + seconds / 3600
+  if (Math.abs(degrees) > maximum || (Math.abs(degrees) === maximum && (minutes > 0 || seconds > 0))) {
+    return undefined
+  }
+
+  // An explicit sign must agree with an explicit hemisphere. An unsigned
+  // degree followed by S/W is normal notation and is not a conflict.
+  const signToken = degreeText[0]
+  if (hemisphere && (signToken === '+' || signToken === '-')) {
+    const signIsNegative = signToken === '-'
+    if (signIsNegative !== hemisphereIsNegative(hemisphere)) return undefined
+  }
+  const negative = hemisphere ? hemisphereIsNegative(hemisphere) : degrees < 0
+  const value = negative ? -magnitude : magnitude
+  return Number.isFinite(value) ? value : undefined
+}
+
+function parseDecimalAnglePart(
+  valueText: string,
+  hemisphere: CoordinateHemisphere | undefined,
+  axis: CoordinateAxis,
+): number | undefined {
+  const value = Number(valueText)
+  if (!Number.isFinite(value) || !isHemisphereForAxis(hemisphere, axis)) return undefined
+  const maximum = axis === 'latitude' ? 90 : 180
+  const magnitude = Math.abs(value)
+  if (magnitude > maximum) return undefined
+
+  const signToken = valueText[0]
+  if (hemisphere && (signToken === '+' || signToken === '-')) {
+    const signIsNegative = signToken === '-'
+    if (signIsNegative !== hemisphereIsNegative(hemisphere)) return undefined
+  }
+  const negative = hemisphere ? hemisphereIsNegative(hemisphere) : value < 0
+  const result = negative ? -magnitude : magnitude
+  return Number.isFinite(result) ? result : undefined
+}
+
+function separatorHasCommaOrSemicolon(separator: string): boolean {
+  return separator.includes(',') || separator.includes(';')
+}
+
+function parseDmsMatch(match: RegExpMatchArray): Coordinate | undefined {
+  const latHemisphere = match[4]?.toUpperCase() as CoordinateHemisphere | undefined
+  const lngHemisphere = match[9]?.toUpperCase() as CoordinateHemisphere | undefined
+  const separator = match[5] || ''
+  // Whitespace-only DMS needs both axis markers; otherwise a comma/semicolon
+  // is required to make the conventional lat,lng order explicit.
+  if ((!latHemisphere || !lngHemisphere) && !separatorHasCommaOrSemicolon(separator)) return undefined
+  const lat = parseAnglePart(
+    match[1],
+    Number(match[2]),
+    Number(match[3]),
+    latHemisphere,
+    'latitude',
+  )
+  const lng = parseAnglePart(
+    match[6],
+    Number(match[7]),
+    Number(match[8]),
+    lngHemisphere,
+    'longitude',
+  )
+  if (lat === undefined || lng === undefined) return undefined
+  const coordinate = { lat, lng }
+  return isValidCoordinate(coordinate) ? coordinate : undefined
+}
+
+function parseDmMatch(match: RegExpMatchArray): Coordinate | undefined {
+  const latHemisphere = match[3]?.toUpperCase() as CoordinateHemisphere | undefined
+  const lngHemisphere = match[7]?.toUpperCase() as CoordinateHemisphere | undefined
+  const separator = match[4] || ''
+  if ((!latHemisphere || !lngHemisphere) && !separatorHasCommaOrSemicolon(separator)) return undefined
+  const lat = parseAnglePart(match[1], Number(match[2]), 0, latHemisphere, 'latitude')
+  const lng = parseAnglePart(match[5], Number(match[6]), 0, lngHemisphere, 'longitude')
+  if (lat === undefined || lng === undefined) return undefined
+  const coordinate = { lat, lng }
+  return isValidCoordinate(coordinate) ? coordinate : undefined
+}
+
+function parseDdMatch(match: RegExpMatchArray): Coordinate | undefined {
+  const latHemisphere = match[3]?.toUpperCase() as CoordinateHemisphere | undefined
+  const lngHemisphere = match[7]?.toUpperCase() as CoordinateHemisphere | undefined
+  const hasLatDegreeSymbol = Boolean(match[2])
+  const hasLngDegreeSymbol = Boolean(match[6])
+  const latText = match[1]
+  const lngText = match[5]
+  const hasDecimalPair = latText.includes('.') && lngText.includes('.')
+
+  // Preserve the old false-positive guard for integer-only plain text. An
+  // integer is valid when degree symbols or hemispheres make the notation
+  // explicit (for example, `39°N 84°W`).
+  if (!hasDecimalPair && !(hasLatDegreeSymbol && hasLngDegreeSymbol) && !latHemisphere && !lngHemisphere) {
+    return undefined
+  }
+  const lat = parseDecimalAnglePart(latText, latHemisphere, 'latitude')
+  const lng = parseDecimalAnglePart(lngText, lngHemisphere, 'longitude')
+  if (lat === undefined || lng === undefined) return undefined
+  const coordinate = { lat, lng }
+  return isValidCoordinate(coordinate) ? coordinate : undefined
+}
+
+function rangeOverlaps(
+  start: number,
+  end: number,
+  occupied: readonly { start: number; end: number }[],
+): boolean {
+  return occupied.some((range) => start < range.end && end > range.start)
+}
+
+function hasStructuredMarker(text: string): boolean {
+  // This is only used to suppress the unsafe decimal fallback when a malformed
+  // DMS/hemisphere expression was seen. Standalone N/S/E/W markers are enough;
+  // ordinary CJK/Latin labels remain compatible with the legacy fallback.
+  return text.includes('°') || /(?:^|[^A-Za-z])[NSEW](?:$|[^A-Za-z])/i.test(text)
+}
 
 /**
  * Extract every decimal lat,lng pair from arbitrary OCR text.
@@ -202,18 +388,50 @@ function parseCoordinateText(
   options: CoordinateConfidenceOptions = {},
   confidence?: number,
 ): Coordinate[] {
-  // NFKC covers full-width OCR digits/punctuation; the explicit replacements
-  // cover common Vision outputs for a Unicode minus sign.
-  const text = raw.normalize('NFKC').replace(/[−﹣－]/g, '-')
+  const text = normalizeCoordinateText(raw)
   if (text.length === 0 || !passesConfidence(confidence, options)) return []
-  const matcher = new RegExp(COORD_DECIMAL_RE_SOURCE, 'g')
-  const candidates: Coordinate[] = []
-  let match: RegExpExecArray | null
-  while ((match = matcher.exec(text)) !== null) {
-    const coordinate = { lat: Number(match[1]), lng: Number(match[2]) }
-    if (isValidCoordinate(coordinate)) candidates.push(coordinate)
+  const parsed: ParsedCoordinateMatch[] = []
+  const occupied: Array<{ start: number; end: number }> = []
+
+  const collect = (
+    matcher: RegExp,
+    parser: (match: RegExpMatchArray) => Coordinate | undefined,
+    reserveInvalid = true,
+  ) => {
+    for (const match of text.matchAll(matcher)) {
+      const start = match.index ?? -1
+      if (start < 0) continue
+      const end = start + match[0].length
+      if (rangeOverlaps(start, end, occupied)) continue
+      const coordinate = parser(match)
+      if (coordinate) parsed.push({ coordinate, start, end })
+      if (coordinate || reserveInvalid) occupied.push({ start, end })
+    }
   }
-  return candidates
+
+  // Specific notations win over the decimal pass. Reserving even malformed
+  // structured spans prevents their seconds/minutes from becoming a bogus DD
+  // pair through the permissive legacy fallback.
+  collect(COORD_DMS_RE, parseDmsMatch)
+  collect(COORD_DM_RE, parseDmMatch)
+  collect(COORD_DD_RE, parseDdMatch)
+
+  const fallback = new RegExp(COORD_DECIMAL_FALLBACK_RE_SOURCE, 'g')
+  for (const match of text.matchAll(fallback)) {
+    const start = match.index ?? -1
+    if (start < 0) continue
+    const end = start + match[0].length
+    if (rangeOverlaps(start, end, occupied)) continue
+    // If a malformed DMS/directional expression was not matched above, do not
+    // reinterpret its decimal seconds as a valid latitude/longitude pair.
+    if (hasStructuredMarker(match[0])) continue
+    const coordinate = { lat: Number(match[1]), lng: Number(match[2]) }
+    if (isValidCoordinate(coordinate)) parsed.push({ coordinate, start, end })
+  }
+
+  return parsed
+    .sort((a, b) => a.start - b.start)
+    .map((entry) => entry.coordinate)
 }
 
 function coordinateFromOcrCandidate(part: OcrCoordinateCandidate): Coordinate | undefined {
@@ -279,6 +497,12 @@ export const parseGpsCandidates = parseAllCoordinates
 export interface CoordinateDetectorOptions extends CoordinateDedupeOptions, CoordinateConfidenceOptions {
   /** Number of consecutive matching frames needed before an attempt. */
   stabilityFrames?: number
+  /**
+   * Let the first stable coordinate become triggerable instead of using the
+   * first valid frame as a baseline. Defaults to false so existing callers
+   * keep the conservative baseline behavior.
+   */
+  triggerInitialCandidate?: boolean
   /** Process the first stable coordinate from a multi-coordinate frame. */
   continuous?: boolean
   /** Minimum time between emitted attempts, regardless of success/failure. */
@@ -359,7 +583,7 @@ function cloneCoordinate(coordinate: Coordinate): Coordinate {
  * storage.  Those effects stay in the UI/Electron integration layer.
  */
 export class CoordinateAutoDetector {
-  readonly options: Required<Pick<CoordinateDetectorOptions, 'stabilityFrames' | 'roundDecimals' | 'distanceMeters' | 'minIntervalMs' | 'minConfidence' | 'requireConfidence' | 'continuous' | 'queuePolicy' | 'queueMaxAgeMs'>>
+  readonly options: Required<Pick<CoordinateDetectorOptions, 'stabilityFrames' | 'roundDecimals' | 'distanceMeters' | 'minIntervalMs' | 'minConfidence' | 'requireConfidence' | 'triggerInitialCandidate' | 'continuous' | 'queuePolicy' | 'queueMaxAgeMs'>>
 
   private readonly clock: () => number
   private initialized = false
@@ -409,6 +633,7 @@ export class CoordinateAutoDetector {
       minIntervalMs,
       minConfidence,
       requireConfidence: options.requireConfidence ?? false,
+      triggerInitialCandidate: options.triggerInitialCandidate ?? false,
       continuous: options.continuous ?? false,
       queuePolicy,
       queueMaxAgeMs: queueMaxAgeMs > 0 ? queueMaxAgeMs : 0,
@@ -432,13 +657,18 @@ export class CoordinateAutoDetector {
         })
       }
       this.initialized = true
-      // Existing on-screen text is the baseline.  Marking it seen also means
-      // scrolling it out and back in cannot unexpectedly teleport again.
-      this.seen = candidates.map(cloneCoordinate)
-      this.clearPending()
-      return this.result('baseline', 'baseline', candidates, [], {
-        reason: 'initial_baseline',
-      })
+      if (!this.options.triggerInitialCandidate) {
+        // Existing on-screen text is the baseline.  Marking it seen also means
+        // scrolling it out and back in cannot unexpectedly teleport again.
+        this.seen = candidates.map(cloneCoordinate)
+        this.clearPending()
+        return this.result('baseline', 'baseline', candidates, [], {
+          reason: 'initial_baseline',
+        })
+      }
+      // GPS screen-watch opts into this branch: keep the first valid points as
+      // pending candidates and let the normal stability gate require two
+      // matching frames before anything can be emitted.
     }
 
     if (this.options.continuous) {

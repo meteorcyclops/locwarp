@@ -33,3 +33,10 @@ test('latency tuning keeps the two-frame safety gate', () => {
   assert.match(mainSource, /fps: 8/);
   assert.match(helperSource, /streamConfiguration\.queueDepth = 2/);
 });
+
+test('small-text OCR keeps accurate recognition and lowers only the glyph-height filter', () => {
+  assert.match(mainSource, /recognitionLevel: 'accurate'/);
+  assert.match(helperSource, /request\.minimumTextHeight = 0\.005/);
+  assert.match(controlSource, /minConfidence: 0\.9/);
+  assert.match(controlSource, /stabilityFrames: 2/);
+});

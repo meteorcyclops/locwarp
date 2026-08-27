@@ -31,6 +31,63 @@ test('parser rejects out-of-range and integer-only false positives', async () =>
   ]), [{ lat: 25.033, lng: 121.565 }]);
 });
 
+test('parser converts DD direction suffixes, DM, and DMS into signed decimals', async () => {
+  const { parseCoordinateCandidates } = await moduleUnderTest;
+
+  assert.deepEqual(parseCoordinateCandidates('39.005472°N, 84.606083°W'), [
+    { lat: 39.005472, lng: -84.606083 },
+  ]);
+  assert.deepEqual(parseCoordinateCandidates('25.033N 121.565W'), [
+    { lat: 25.033, lng: -121.565 },
+  ]);
+  assert.deepEqual(parseCoordinateCandidates('−25.033，121.565'), [
+    { lat: -25.033, lng: 121.565 },
+  ]);
+
+  const dms = parseCoordinateCandidates('39°00\'19.7"N 84°36\'21.9"W');
+  assert.equal(dms.length, 1);
+  assert.ok(Math.abs(dms[0].lat - 39.00547222222222) < 1e-12);
+  assert.ok(Math.abs(dms[0].lng + 84.60608333333333) < 1e-12);
+
+  const unicodeDms = parseCoordinateCandidates('39°00′19.7″N 84°36′21.9″W');
+  assert.equal(unicodeDms.length, 1);
+  assert.ok(Math.abs(unicodeDms[0].lat - dms[0].lat) < 1e-12);
+  assert.ok(Math.abs(unicodeDms[0].lng - dms[0].lng) < 1e-12);
+
+  const curlyQuoteDms = parseCoordinateCandidates('39°00‘19.7“N 84°36‘21.9“W');
+  assert.equal(curlyQuoteDms.length, 1);
+  assert.ok(Math.abs(curlyQuoteDms[0].lat - dms[0].lat) < 1e-12);
+  assert.ok(Math.abs(curlyQuoteDms[0].lng - dms[0].lng) < 1e-12);
+
+  const structured = parseCoordinateCandidates([{
+    text: '39°00′19.7″N，84°36′21.9″W',
+    confidence: 0.98,
+  }], { minConfidence: 0.9, requireConfidence: true });
+  assert.equal(structured.length, 1);
+  assert.ok(Math.abs(structured[0].lat - dms[0].lat) < 1e-12);
+  assert.ok(Math.abs(structured[0].lng - dms[0].lng) < 1e-12);
+
+  const dm = parseCoordinateCandidates('39°00.3283\'N 84°36.365\'W');
+  assert.equal(dm.length, 1);
+  assert.ok(Math.abs(dm[0].lat - 39.00547166666667) < 1e-12);
+  assert.ok(Math.abs(dm[0].lng + 84.60608333333333) < 1e-12);
+});
+
+test('directional coordinate parser rejects invalid components and sign conflicts', async () => {
+  const { parseCoordinateCandidates } = await moduleUnderTest;
+  const invalid = [
+    '39°60\'0"N 84°36\'21.9"W',
+    '39°00\'60"N 84°36\'21.9"W',
+    '91°00\'0"N 84°36\'21.9"W',
+    '39°00\'19.7"E 84°36\'21.9"N',
+    '-39°00\'19.7"N 84°36\'21.9"W',
+    '+39.005472°S, 84.606083°W',
+    '-39.005472°N, 84.606083°W',
+    '39.005472°N, -84.606083°E',
+  ];
+  for (const text of invalid) assert.deepEqual(parseCoordinateCandidates(text), [], text);
+});
+
 test('rounding and distance de-duplicate OCR jitter while retaining far points', async () => {
   const { dedupeCoordinates, coordinateKey, distanceMeters } = await moduleUnderTest;
   const close = { lat: 25.03300, lng: 121.56500 };
@@ -49,6 +106,41 @@ test('first frame establishes a baseline and never triggers it', async () => {
   assert.equal(first.ready, false);
   assert.equal(detector.observe('25.033,121.565', 50).status, 'none');
   assert.equal(detector.getSeenCoordinates().length, 1);
+});
+
+test('triggerInitialCandidate keeps the default baseline opt-in and emits after two stable frames', async () => {
+  const { CoordinateAutoDetector } = await moduleUnderTest;
+  const detector = new CoordinateAutoDetector({
+    continuous: true,
+    triggerInitialCandidate: true,
+    minIntervalMs: 0,
+  });
+
+  const first = detector.observe('39°00\'19.7"N 84°36\'21.9"W', 0);
+  assert.equal(first.phase, 'pending');
+  assert.equal(first.ready, false);
+  assert.equal(first.stableFrames, 1);
+
+  const second = detector.observe('39°00′19.7″N 84°36′21.9″W', 10);
+  assert.equal(second.phase, 'ready');
+  assert.equal(second.ready, true);
+  assert.ok(Math.abs(second.coordinate.lat - 39.00547222222222) < 1e-12);
+  assert.ok(Math.abs(second.coordinate.lng + 84.60608333333333) < 1e-12);
+});
+
+test('triggerInitialCandidate still waits for a useful frame after OCR warm-up empties', async () => {
+  const { CoordinateAutoDetector } = await moduleUnderTest;
+  const detector = new CoordinateAutoDetector({
+    continuous: true,
+    triggerInitialCandidate: true,
+    minIntervalMs: 0,
+  });
+
+  assert.equal(detector.observe([], 0).phase, 'empty');
+  assert.equal(detector.observe('25.033N 121.565E', 10).phase, 'pending');
+  const ready = detector.observe('25.033N 121.565E', 20);
+  assert.equal(ready.ready, true);
+  assert.deepEqual(ready.coordinate, { lat: 25.033, lng: 121.565 });
 });
 
 test('empty first frames do not finish baseline; first valid frame is baseline and later repeats stay inert', async () => {
