@@ -23,6 +23,7 @@ import GpsWatchControl from './components/GpsWatchControl'
 import { DeviceChipRow } from './components/DeviceChipRow'
 import type { FanoutOutcome } from './hooks/useSimulation'
 import type { Coordinate as DetectedCoordinate } from './utils/coordinateDetector'
+import { isRouteRunningStatus } from './utils/simulationState'
 
 // Summarise a group fan-out result into a single toast string.
 // Call from action handlers: showToast(toastForFanout(t, 'teleport', outcome, connectedDevices))
@@ -669,7 +670,7 @@ const App: React.FC = () => {
   ) => {
     const target = device.connectedDevices.find((item) => item.udid === targetUdid)
     if (!target) throw new Error('沒有已連線的 iPhone')
-    if (sim.status?.running) throw new Error('路線執行中，已停止自動瞬移')
+    if (isRouteRunningStatus(sim.status)) throw new Error('路線執行中，已停止自動瞬移')
     await api.teleport(coordinate.lat, coordinate.lng, target.udid, true)
     sim.setCurrentPosition({ lat: coordinate.lat, lng: coordinate.lng })
     setPreviewPin(null)
@@ -2311,7 +2312,7 @@ const App: React.FC = () => {
         />
         <GpsWatchControl
           isConnected={gpsWatchTargetUdid !== null}
-          isRouteRunning={Boolean(sim.status?.running)}
+          isRouteRunning={isRouteRunningStatus(sim.status)}
           targetUdid={gpsWatchTargetUdid}
           onTeleport={handleGpsWatchTeleport}
           onShowToast={showToast}

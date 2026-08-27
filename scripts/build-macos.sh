@@ -28,6 +28,25 @@ fi
 node --version >/dev/null
 npm --version >/dev/null
 
+# Screen Recording consent is tied to the app's designated code requirement.
+# An ad-hoc signature reduces that requirement to the build-specific CDHash,
+# which makes every rebuild look like a different app to macOS TCC. Require a
+# stable Apple signing identity for local macOS builds so permission survives
+# upgrades. Developers can select a different valid identity explicitly.
+macos_signing_identity="${MACOS_SIGNING_IDENTITY:-}"
+if [ -z "$macos_signing_identity" ]; then
+  macos_signing_identity=$(
+    security find-identity -v -p codesigning 2>/dev/null |
+      awk -F '"' '/"Apple Development:/{ print $2; exit }'
+  )
+fi
+if [ -z "$macos_signing_identity" ]; then
+  echo "A stable Apple Development signing identity is required." >&2
+  echo "Install one in Keychain or set MACOS_SIGNING_IDENTITY explicitly." >&2
+  exit 1
+fi
+echo "Using macOS signing identity: $macos_signing_identity"
+
 # Build the local-only ScreenCaptureKit + Vision OCR helper before invoking
 # electron-builder. It is shipped as an extraResource so Electron can spawn it
 # without putting capture code in the renderer or Node main process.
@@ -84,6 +103,17 @@ case "$macos_arch" in
     ;;
 esac
 
+# Sign the standalone capture helper before it is copied into the app. Giving
+# it a stable identifier and the same Team ID as the outer app avoids a second
+# build-specific identity at the actual ScreenCaptureKit call site.
+codesign --force \
+  --options runtime \
+  --timestamp=none \
+  --identifier com.locwarp.ocr-helper \
+  --sign "$macos_signing_identity" \
+  "$helper_output_dir/locwarp-ocr-helper"
+codesign --verify --strict "$helper_output_dir/locwarp-ocr-helper"
+
 python3 -m venv "$venv_dir"
 "$venv_dir/bin/python" -m pip install -r "$repo_dir/backend/requirements.txt" "pyinstaller==6.21.0"
 
@@ -112,9 +142,9 @@ PY
   npm test
   npm run build
   case "$macos_arch" in
-    arm64) npx electron-builder --mac dir --arm64 -c.mac.identity=null ;;
-    x86_64) npx electron-builder --mac dir --x64 -c.mac.identity=null ;;
-    universal) npx electron-builder --mac dir --universal -c.mac.identity=null ;;
+    arm64) npx electron-builder --mac dir --arm64 -c.mac.type=development -c.mac.identity="$macos_signing_identity" ;;
+    x86_64) npx electron-builder --mac dir --x64 -c.mac.type=development -c.mac.identity="$macos_signing_identity" ;;
+    universal) npx electron-builder --mac dir --universal -c.mac.type=development -c.mac.identity="$macos_signing_identity" ;;
   esac
 )
 
@@ -124,9 +154,33 @@ case "$macos_arch" in
   universal) release_dir="mac" ;;
 esac
 app_path="$repo_dir/frontend/release/$release_dir/LocWarp.app"
-# identity=null keeps local builds independent of a Developer ID certificate,
-# but Electron's nested framework signatures still need a final consistent
-# ad-hoc seal after extraResources (including the OCR helper) are copied in.
-codesign --force --deep --sign - "$app_path"
+packaged_helper_path="$app_path/Contents/Resources/locwarp-ocr-helper"
 codesign --verify --deep --strict "$app_path"
-echo "Built and ad-hoc signed: $app_path"
+
+app_team_id=$(codesign -dvv "$app_path" 2>&1 | awk -F= '/^TeamIdentifier=/{ print $2; exit }')
+helper_team_id=$(codesign -dvv "$packaged_helper_path" 2>&1 | awk -F= '/^TeamIdentifier=/{ print $2; exit }')
+app_requirement=$(codesign -dr - "$app_path" 2>&1 | sed -n 's/^designated => //p')
+helper_requirement=$(codesign -dr - "$packaged_helper_path" 2>&1 | sed -n 's/^designated => //p')
+
+if [ -z "$app_team_id" ] || [ "$app_team_id" = "not set" ]; then
+  echo "Packaged app does not have a stable TeamIdentifier." >&2
+  exit 1
+fi
+if [ "$helper_team_id" != "$app_team_id" ]; then
+  echo "OCR helper TeamIdentifier ($helper_team_id) does not match app ($app_team_id)." >&2
+  exit 1
+fi
+case "$app_requirement" in
+  *cdhash*)
+    echo "Packaged app still has a CDHash-only designated requirement." >&2
+    exit 1
+    ;;
+esac
+case "$helper_requirement" in
+  *cdhash*)
+    echo "OCR helper still has a CDHash-only designated requirement." >&2
+    exit 1
+    ;;
+esac
+
+echo "Built with stable TeamIdentifier $app_team_id: $app_path"
