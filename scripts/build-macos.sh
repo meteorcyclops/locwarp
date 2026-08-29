@@ -136,6 +136,15 @@ PY
     --noconfirm --distpath ../dist-py --workpath ../build-py
 )
 
+worker_self_test_output=$("$repo_dir/dist-py/locwarp-backend/locwarp-backend" --wifi-worker --self-test)
+case "$worker_self_test_output" in
+  *'"ok":true'*'"mode":"wifi-worker"'*'"protocol":1'*) ;;
+  *)
+    echo "Frozen WiFi worker self-test returned an unexpected payload: $worker_self_test_output" >&2
+    exit 1
+    ;;
+esac
+
 (
   cd "$repo_dir/frontend"
   npm ci

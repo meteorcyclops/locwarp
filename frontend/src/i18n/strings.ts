@@ -161,6 +161,13 @@ export const STRINGS = {
   'group.action_all_success': { zh: '{action} 已啟動於全部裝置', en: '{action} started on all devices' },
   'group.action_partial': { zh: '{action}:A {aStatus},B {bStatus}', en: '{action}: A {aStatus}, B {bStatus}' },
   'group.action_all_failed': { zh: '{action} 失敗', en: '{action} failed on all devices' },
+  'group.connection_summary': { zh: '同步群組 {ready}/{total} 台 GPS 已就緒', en: 'Sync group {ready}/{total} GPS ready' },
+  'group.device_paired': { zh: '已配對', en: 'Paired' },
+  'group.device_exploring': { zh: '探索中', en: 'Discovering' },
+  'group.device_tunnel': { zh: 'Tunnel', en: 'Tunnel' },
+  'group.device_gps_ready': { zh: 'GPS 就緒', en: 'GPS ready' },
+  'group.device_gps_waiting': { zh: 'GPS 待驗證', en: 'GPS pending verification' },
+  'group.device_connected': { zh: '已連線', en: 'Connected' },
 
   // ── Device chip ──────────────────────────────
   'device.add_device': { zh: '掃描 iPhone', en: 'Scan iPhone' },
@@ -375,7 +382,7 @@ export const STRINGS = {
   'wifi.device_not_detected': { zh: '未偵測到裝置,請確認 iPhone 與電腦在同一 WiFi', en: 'Device not detected, ensure iPhone and computer are on the same Wi-Fi' },
   'wifi.detect_failed': { zh: '偵測失敗', en: 'Detection failed' },
   'wifi.autoconnect_label': { zh: '啟動時自動連線(用上次的 IP)', en: 'Auto-connect on launch (use last IP)' },
-  'wifi.autoconnect_tooltip': { zh: '打開 LocWarp 時,如果沒有裝置已連線,會自動嘗試上次成功的 IP / Port', en: 'When LocWarp starts, automatically try last successful IP / Port if no device is connected yet' },
+  'wifi.autoconnect_tooltip': { zh: '打開 LocWarp 時,會逐台嘗試尚未連線的已儲存 iPhone；不會因第一台成功就跳過其他台', en: 'On launch, try every saved iPhone that is not connected yet; one successful device will not skip the others' },
   'panel.waypoints_set_as_start': { zh: '設為起點並飛過去(從這裡開始巡迴)', en: 'Set as start and fly here (loop begins from this point)' },
   'panel.waypoints_set_as_start_short': { zh: '起點', en: 'Start' },
   'panel.wp_fly_set_as_start': { zh: '設為起點並飛過去', en: 'Set as start + fly' },

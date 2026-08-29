@@ -1,10 +1,10 @@
-"""In-process WiFi tunnel runner.
+"""WiFi tunnel runner compatibility layer.
 
-Backend now runs on Python 3.13 (native TLS-PSK support), so the tunnel
-lives inside the backend event loop instead of a separate helper exe.
-The tunnel context (`service.start_tcp_tunnel()`) must stay open for the
-RSD link to remain usable, so we hold it inside a long-running task and
-release it via a stop event.
+The legacy in-process runner is retained for non-macOS callers and tests.
+macOS production callers opt into :class:`WifiWorkerRunner`, which starts a
+separate same-executable worker for each iPhone.  pymobiledevice3's root-free
+PyTCP stack is process-global, so process isolation is what makes two WiFi
+devices safe at the same time.
 """
 
 import asyncio
@@ -15,10 +15,11 @@ from contextlib import AsyncExitStack
 logger = logging.getLogger("wifi_tunnel")
 
 
-class TunnelRunner:
+class _InProcessTunnelRunner:
     """Owns the tunnel asyncio task and its RSD info."""
 
-    def __init__(self) -> None:
+    def __init__(self, owner: object | None = None) -> None:
+        self._owner = owner or self
         self.info: dict | None = None
         # On macOS this RSD is reachable only through the in-process PyTCP
         # dial plane. DeviceManager must adopt this exact connected object.
@@ -86,12 +87,12 @@ class TunnelRunner:
                     from pymobiledevice3.remote.userspace_tunnel import UserspaceDialPlane
 
                     active = getattr(userspace_module, "_active_tunnel", None)
-                    if active is not None and active is not self:
+                    if active is not None and active is not self._owner:
                         raise RuntimeError(
                             "USB userspace tunnel is still active; unplug the iPhone "
                             "and wait for USB disconnect before starting WiFi"
                         )
-                    userspace_module._active_tunnel = self
+                    userspace_module._active_tunnel = self._owner
                     userspace_module.USERSPACE_ACTIVE = True
                     tunnel_service.USE_USERSPACE_TUNNEL = True
 
@@ -168,7 +169,7 @@ class TunnelRunner:
                     import pymobiledevice3.remote.userspace_tunnel as userspace_module
                     import pymobiledevice3.remote.tunnel_service as tunnel_service
 
-                    if getattr(userspace_module, "_active_tunnel", None) is self:
+                    if getattr(userspace_module, "_active_tunnel", None) is self._owner:
                         userspace_module._active_tunnel = None
                         userspace_module.USERSPACE_ACTIVE = False
                         tunnel_service.USE_USERSPACE_TUNNEL = False
@@ -230,3 +231,48 @@ class TunnelRunner:
         self.info = None
         self.rsd = None
         self.tun = None
+
+
+class TunnelRunner:
+    """Compatibility facade for the old runner and the macOS worker runner.
+
+    Existing unit tests and non-macOS paths still get the in-process runner.
+    The API layer calls :meth:`enable_worker` on macOS before starting a WiFi
+    tunnel; keeping the selection explicit avoids changing legacy callers
+    that rely on an in-process RSD object.
+    """
+
+    def __init__(self) -> None:
+        self._impl: object = _InProcessTunnelRunner(owner=self)
+        self._worker_enabled = False
+
+    def enable_worker(self) -> None:
+        """Switch this not-yet-started facade to a process-isolated worker."""
+        if self._worker_enabled:
+            return
+        if getattr(self._impl, "is_running", lambda: False)():
+            raise RuntimeError("cannot switch a running tunnel to worker mode")
+        from core.wifi_worker import WifiWorkerRunner
+
+        self._impl = WifiWorkerRunner()
+        self._worker_enabled = True
+
+    def __getattr__(self, name: str):
+        # Delegate the established public fields (task, info, rsd, target_*)
+        # and methods to whichever implementation was selected.
+        return getattr(self._impl, name)
+
+    async def start(self, udid: str, ip: str, port: int, timeout: float = 20.0) -> dict:
+        return await self._impl.start(udid, ip, port, timeout=timeout)
+
+    async def stop(self) -> None:
+        return await self._impl.stop()
+
+    def is_running(self) -> bool:
+        return bool(self._impl.is_running())
+
+    async def request(self, op: str, payload: dict, *, timeout: float | None = None) -> dict:
+        request = getattr(self._impl, "request", None)
+        if request is None:
+            raise RuntimeError("in-process tunnel has no worker command channel")
+        return await request(op, payload, timeout=timeout)

@@ -4,14 +4,19 @@ import { wifiTunnelDiscover, wifiTunnelFindPort, wifiRepair, wifiKeepaliveGet, w
 import { useT } from '../i18n';
 import { reconcileConnectionHealth } from '../utils/connectionHealth';
 
-// pymobiledevice3's root-free PyTCP stack is a process singleton on macOS.
-const MAX_TUNNEL_DEVICES = window.electronAPI?.platform === 'darwin' ? 1 : 3;
+// The backend advertises the actual platform capability. Until that response
+// arrives, preserve the old macOS one-tunnel fallback so an old packaged
+// backend cannot be offered a second worker and then return 409.
+const PRODUCT_MAX_TUNNEL_DEVICES = 3;
+const DEFAULT_MAX_TUNNEL_DEVICES = typeof window !== 'undefined'
+  && window.electronAPI?.platform === 'darwin' ? 1 : 3;
 
 interface Device {
   id: string;
   name: string;
   iosVersion: string;
   connectionType?: string;
+  isConnected?: boolean;
   developerModeEnabled?: boolean | null;
 }
 
@@ -35,6 +40,7 @@ interface DeviceStatusProps {
   pinnedUdids?: string[];
   onTogglePin?: (udid: string) => void;
   connectionHealth?: ConnectionHealth[];
+  maxTunnelDevices?: number;
 }
 
 const ConnectionHealthCard: React.FC<{ health: ConnectionHealth }> = ({ health }) => {
@@ -170,6 +176,7 @@ const DeviceStatus: React.FC<DeviceStatusProps> = ({
   pinnedUdids = [],
   onTogglePin,
   connectionHealth = [],
+  maxTunnelDevices = DEFAULT_MAX_TUNNEL_DEVICES,
 }) => {
   const t = useT();
   const [showDropdown, setShowDropdown] = useState(false);
@@ -248,6 +255,47 @@ const DeviceStatus: React.FC<DeviceStatusProps> = ({
   const [repairMessage, setRepairMessage] = useState<string>('');
   const [ddiMountState, setDdiMountState] = useState<'idle' | 'running' | 'success' | 'failed'>('idle');
   const [ddiMountMessage, setDdiMountMessage] = useState<string>('');
+  const tunnelLimit = Math.min(
+    PRODUCT_MAX_TUNNEL_DEVICES,
+    Math.max(1, Math.floor(Number(maxTunnelDevices) || DEFAULT_MAX_TUNNEL_DEVICES)),
+  );
+
+  // Keep the connection page useful in group mode: a single selected-device
+  // health card is not enough to explain why 1/2 or 2/2 phones can receive a
+  // GPS update. This compact roster surfaces paired/connected/tunnel/GPS
+  // state for every known device without changing any backend semantics.
+  const groupDevices = devices.slice(0, 3);
+  const tunnelByUdid = new Map(tunnels.map((tn) => [tn.udid, tn]));
+  const healthByUdid = new Map(connectionHealth.map((health) => [health.udid.toLowerCase(), health]));
+  const isDeviceConnected = (item: Device) => item.isConnected === true
+    || item.id === device?.id && isConnected
+    || tunnelByUdid.has(item.id);
+  const isDeviceReady = (item: Device) => {
+    if (!isDeviceConnected(item)) return false;
+    const health = healthByUdid.get(item.id.toLowerCase());
+    // Do not infer GPS readiness from a TCP tunnel alone. The backend must
+    // report a healthy location channel after the first accepted write;
+    // otherwise show the member as connected/tunnel-ready but unverified.
+    return health?.location_channel_state === 'healthy';
+  };
+  const connectionStage = (item: Device) => {
+    if (!isDeviceConnected(item)) return 'paired';
+    const health = healthByUdid.get(item.id.toLowerCase());
+    if (item.connectionType === 'Network' && !tunnelByUdid.has(item.id)) return 'exploring';
+    if (health?.location_channel_state === 'healthy') return 'gps';
+    if (health?.location_channel_state === 'recovering' || health?.location_channel_state === 'unavailable') return 'gps_waiting';
+    if (item.connectionType === 'Network') return 'tunnel';
+    return 'connected';
+  };
+  const stageLabel = (stage: string) => ({
+    paired: t('group.device_paired'),
+    exploring: t('group.device_exploring'),
+    tunnel: t('group.device_tunnel'),
+    gps: t('group.device_gps_ready'),
+    gps_waiting: t('group.device_gps_waiting'),
+    connected: t('group.device_connected'),
+  }[stage] || stage);
+  const readyCount = groupDevices.filter(isDeviceReady).length;
 
   const handleRepair = async () => {
     setRepairState('running');
@@ -341,6 +389,36 @@ const DeviceStatus: React.FC<DeviceStatusProps> = ({
   return (
     <div className={`device-status ${isConnected ? 'device-connected' : 'device-disconnected'}`}>
       {displayedHealth && <ConnectionHealthCard health={displayedHealth} />}
+      {groupDevices.length > 1 && (
+        <div
+          className="connection-group-summary"
+          aria-label={t('group.connection_summary', { ready: readyCount, total: groupDevices.length })}
+          style={{
+            marginBottom: 8, padding: '7px 9px', borderRadius: 6,
+            border: '1px solid rgba(108, 140, 255, 0.22)',
+            background: 'rgba(108, 140, 255, 0.07)',
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 5 }}>
+            <strong style={{ fontSize: 11 }}>{t('group.connection_summary', { ready: readyCount, total: groupDevices.length })}</strong>
+            <span style={{ fontSize: 10, opacity: 0.6 }}>{tunnelLimit} max</span>
+          </div>
+          <div style={{ display: 'grid', gap: 3 }}>
+            {groupDevices.map((item, index) => {
+              const stage = connectionStage(item);
+              const ready = stage === 'gps';
+              return (
+                <div key={item.id} style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0, fontSize: 10 }}>
+                  <span style={{ width: 6, height: 6, borderRadius: '50%', flexShrink: 0, background: ready ? '#4ecdc4' : isDeviceConnected(item) ? '#ffb627' : '#858b9a' }} />
+                  <span style={{ color: ['#4285f4', '#ff9800', '#9c6ade'][index] || '#9aa4bd', fontWeight: 700, flexShrink: 0 }}>{String.fromCharCode(65 + index)}</span>
+                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>{item.name || item.id.slice(0, 10)}</span>
+                  <span style={{ opacity: 0.72, whiteSpace: 'nowrap' }}>{stageLabel(stage)}</span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
       {/* Device info card — no scan button inside */}
       <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, marginBottom: 6 }}>
         <div
@@ -718,7 +796,7 @@ const DeviceStatus: React.FC<DeviceStatusProps> = ({
                 </button>
                 <button
                   onClick={handleDiscover}
-                  disabled={discovering || tunnels.length >= MAX_TUNNEL_DEVICES}
+                  disabled={discovering || tunnels.length >= tunnelLimit}
                   title={t('wifi.detect_tooltip')}
                   style={{
                     flex: 1, fontSize: 11, padding: '5px 0', borderRadius: 5,
@@ -726,7 +804,7 @@ const DeviceStatus: React.FC<DeviceStatusProps> = ({
                     background: 'rgba(108, 140, 255, 0.12)',
                     color: '#6c8cff', cursor: discovering ? 'wait' : 'pointer',
                     display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 4,
-                    opacity: (discovering || tunnels.length >= MAX_TUNNEL_DEVICES) ? 0.5 : 1,
+                    opacity: (discovering || tunnels.length >= tunnelLimit) ? 0.5 : 1,
                   }}
                 >
                   <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" style={discovering ? { animation: 'spin 1s linear infinite' } : undefined}>
@@ -868,14 +946,14 @@ const DeviceStatus: React.FC<DeviceStatusProps> = ({
               {/* iOS 17+ WiFi Tunnel (RSD) — add form */}
               {onStartWifiTunnel && (
                 <>
-                  {tunnels.length >= MAX_TUNNEL_DEVICES ? (
+                  {tunnels.length >= tunnelLimit ? (
                     <div style={{
                       fontSize: 11, padding: '6px 8px', textAlign: 'center',
                       opacity: 0.5,
                       border: '1px dashed rgba(255,255,255,0.15)',
                       borderRadius: 3,
                     }}>
-                      {t('wifi.tunnel_max_reached', { max: MAX_TUNNEL_DEVICES })}
+                      {t('wifi.tunnel_max_reached', { max: tunnelLimit })}
                     </div>
                   ) : (
                     <div>

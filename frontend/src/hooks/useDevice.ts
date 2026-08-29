@@ -2,11 +2,25 @@ import { useState, useCallback, useEffect, useRef } from 'react'
 import {
   listDevices, connectDevice, disconnectDevice,
   wifiConnect, wifiScan,
-  wifiTunnelStartAndConnect, wifiTunnelStatus, wifiTunnelStop,
+  wifiTunnelStartAndConnect, wifiTunnelStatus, wifiTunnelDiscover, wifiTunnelStop,
   type TunnelInfo,
   type ConnectionHealth, getConnectionDiagnostics,
 } from '../services/api'
 import type { WsMessage } from './useWebSocket'
+
+// The backend may advertise a larger platform-specific limit. Keep the
+// legacy macOS one-tunnel fallback until a newer backend explicitly reports
+// support for multiple workers; this prevents a short startup race from
+// offering a second Wi-Fi tunnel to an old packaged backend.
+export const PRODUCT_MAX_TUNNEL_DEVICES = 3
+export const DEFAULT_MAX_TUNNEL_DEVICES = typeof window !== 'undefined'
+  && window.electronAPI?.platform === 'darwin' ? 1 : 3
+
+function normalizeTunnelCapacity(value: unknown): number {
+  const n = Number(value)
+  if (!Number.isFinite(n) || n <= 0) return DEFAULT_MAX_TUNNEL_DEVICES
+  return Math.min(PRODUCT_MAX_TUNNEL_DEVICES, Math.max(1, Math.floor(n)))
+}
 
 export interface DeviceInfo {
   udid: string
@@ -223,7 +237,11 @@ export function useDevice(subscribe?: WsSubscribe) {
           connection_type: 'Network',
           is_connected: true,
         }
-        setConnectedDevice(info)
+        // Adding a second Wi-Fi tunnel must not steal the sticky primary
+        // device. Explicit device selection still goes through connect(),
+        // while background/group connects only promote when there is no
+        // surviving active device.
+        setConnectedDevice((prev) => prev && prev.is_connected ? prev : info)
         setDevices((prev) => {
           const filtered = prev.filter((d) => d.udid !== info.udid)
           return [...filtered, info]
@@ -258,9 +276,42 @@ export function useDevice(subscribe?: WsSubscribe) {
   // singleton (mirrors first tunnel) for any leftover single-tunnel callers
   // until they migrate.
   const [tunnels, setTunnels] = useState<TunnelInfo[]>([])
+  const [maxTunnelDevices, setMaxTunnelDevices] = useState(DEFAULT_MAX_TUNNEL_DEVICES)
+  const devicesRef = useRef<DeviceInfo[]>(devices)
+  devicesRef.current = devices
+  const maxTunnelDevicesRef = useRef(maxTunnelDevices)
+  maxTunnelDevicesRef.current = maxTunnelDevices
   const tunnelStatus = tunnels.length > 0
     ? { running: true, rsd_address: tunnels[0].rsd_address, rsd_port: tunnels[0].rsd_port }
     : { running: false }
+
+  // Keep tunnel count/capacity authoritative even when the app was started
+  // after the backend had already restored one or more Wi-Fi workers. Older
+  // macOS backends omit max_devices and still support only one worker, so the
+  // platform-aware fallback remains in force until a newer status response is
+  // available.
+  useEffect(() => {
+    let active = true
+    const refreshTunnelStatus = async () => {
+      try {
+        const res = await wifiTunnelStatus()
+        if (!active) return
+        setTunnels(Array.isArray(res?.tunnels) ? res.tunnels : [])
+        if (res?.max_devices != null) {
+          setMaxTunnelDevices(normalizeTunnelCapacity(res.max_devices))
+        }
+      } catch {
+        // The backend may still be starting; lifecycle events and the next
+        // poll will reconcile the list without disturbing local state.
+      }
+    }
+    void refreshTunnelStatus()
+    const timer = window.setInterval(refreshTunnelStatus, 10_000)
+    return () => {
+      active = false
+      window.clearInterval(timer)
+    }
+  }, [])
 
   // ── Pin & auto-reconnect (issue #33) ──────────────────────────────
   // A pinned device keeps trying to reconnect on its own after the
@@ -281,9 +332,10 @@ export function useDevice(subscribe?: WsSubscribe) {
   const tunnelsRef = useRef<TunnelInfo[]>(tunnels)
   tunnelsRef.current = tunnels
   const pinRetryTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({})
+  const pinReconnectInFlightRef = useRef<Set<string>>(new Set())
   // Set after startWifiTunnel is defined below; the retry loop calls
   // through the ref so we avoid a definition-order cycle.
-  const startWifiTunnelRef = useRef<((ip: string, port?: number, udidHint?: string) => Promise<any>) | null>(null)
+  const startWifiTunnelRef = useRef<((ip: string, port?: number, udidHint?: string, portHints?: number[]) => Promise<any>) | null>(null)
 
   const clearPinRetry = useCallback((udid: string) => {
     const tmr = pinRetryTimers.current[udid]
@@ -304,18 +356,71 @@ export function useDevice(subscribe?: WsSubscribe) {
     if (pinRetryTimers.current[udid]) return // already scheduled
     const attempt = async () => {
       delete pinRetryTimers.current[udid]
-      // Stop if the user unpinned, or the tunnel already came back.
+      // Stop if the user unpinned, the device/tunnel already came back, or a
+      // prior retry for this UDID is still handshaking.
       if (!pinnedRef.current.includes(udid)) return
+      if (pinReconnectInFlightRef.current.has(udid)) return
+      if (devicesRef.current.some((d) => d.udid === udid && d.is_connected)) return
       if (tunnelsRef.current.some((tn) => tn.udid === udid)) return
-      const entry = readSavedEntryFor(udid)
-      if (entry && startWifiTunnelRef.current) {
-        try {
-          await startWifiTunnelRef.current(entry.ip, entry.port, udid)
-          return // success path clears the timer via startWifiTunnel
-        } catch { /* fall through and reschedule */ }
+
+      // Respect the backend-advertised worker capacity. In-flight pin
+      // retries reserve slots as well, preventing a 15s timer storm from
+      // creating duplicate workers while another device is reconnecting.
+      const capacity = Math.max(1, Math.min(PRODUCT_MAX_TUNNEL_DEVICES, Math.floor(Number(maxTunnelDevicesRef.current) || DEFAULT_MAX_TUNNEL_DEVICES)))
+      if (tunnelsRef.current.length + pinReconnectInFlightRef.current.size >= capacity) {
+        schedulePinReconnect(udid, 15000)
+        return
       }
-      if (pinnedRef.current.includes(udid) && !tunnelsRef.current.some((tn) => tn.udid === udid)) {
-        pinRetryTimers.current[udid] = setTimeout(attempt, 15000)
+
+      pinReconnectInFlightRef.current.add(udid)
+      let success = false
+      try {
+        const endpoints: Array<{ ip: string; port: number; ports?: number[] }> = []
+        const seenEndpoints = new Set<string>()
+        const addEndpoint = (ip: string, port: number, ports?: number[]) => {
+          const normalizedIp = String(ip || '').trim()
+          const normalizedPort = Number(port) || 49152
+          if (!normalizedIp) return
+          const key = `${normalizedIp}:${normalizedPort}`
+          if (seenEndpoints.has(key)) return
+          seenEndpoints.add(key)
+          endpoints.push({ ip: normalizedIp, port: normalizedPort, ports })
+        }
+        const saved = readSavedEntryFor(udid)
+        if (saved) addEndpoint(saved.ip, saved.port)
+        try {
+          const discovered = await wifiTunnelDiscover()
+          for (const candidate of (discovered?.devices || [])) {
+            const candidateUdid = typeof candidate.udid === 'string' ? candidate.udid : undefined
+            // Newer discovery may identify the phone; older discovery only
+            // gives an IP. Unknown candidates are safe here because the
+            // UDID-hinted handshake below verifies the peer before success.
+            if (candidateUdid && candidateUdid !== udid) continue
+            addEndpoint(candidate.ip, candidate.port, candidate.ports)
+          }
+        } catch { /* saved endpoint can still be retried */ }
+
+        for (const endpoint of endpoints) {
+          if (!pinnedRef.current.includes(udid)) return
+          if (devicesRef.current.some((d) => d.udid === udid && d.is_connected)) return
+          if (tunnelsRef.current.some((tn) => tn.udid === udid)) return
+          if (!startWifiTunnelRef.current) break
+          try {
+            await startWifiTunnelRef.current(endpoint.ip, endpoint.port, udid, endpoint.ports)
+            success = true
+            return // success path clears the timer via startWifiTunnel
+          } catch {
+            // The saved DHCP address may be stale. Try the next discovered
+            // endpoint for this same UDID before backing off.
+          }
+        }
+      } finally {
+        pinReconnectInFlightRef.current.delete(udid)
+        if (!success && pinnedRef.current.includes(udid)
+          && !devicesRef.current.some((d) => d.udid === udid && d.is_connected)
+          && !tunnelsRef.current.some((tn) => tn.udid === udid)) {
+          schedulePinReconnect(udid, 15000)
+        }
       }
     }
     pinRetryTimers.current[udid] = setTimeout(attempt, delayMs)
@@ -408,6 +513,9 @@ export function useDevice(subscribe?: WsSubscribe) {
     async (ip: string, port = 49152, udidHint?: string, portHints?: number[]) => {
       try {
         const res = await wifiTunnelStartAndConnect(ip, port, udidHint, portHints)
+        if (res?.max_devices != null) {
+          setMaxTunnelDevices(normalizeTunnelCapacity(res.max_devices))
+        }
         // The backend re-scans and may land on a different port than the one
         // we asked for (iOS re-picks RemotePairing on every boot). Remember
         // what actually worked, not what we guessed.
@@ -419,7 +527,10 @@ export function useDevice(subscribe?: WsSubscribe) {
           connection_type: 'Network',
           is_connected: true,
         }
-        setConnectedDevice(info)
+        // A parallel group connect should retain the current primary. The
+        // first successful worker becomes primary only when no device was
+        // active yet; subsequent workers stay visible in connectedDevices.
+        setConnectedDevice((prev) => prev && prev.is_connected ? prev : info)
         setDevices((prev) => {
           const filtered = prev.filter((d) => d.udid !== info.udid)
           return [...filtered, info]
@@ -477,6 +588,9 @@ export function useDevice(subscribe?: WsSubscribe) {
     try {
       const res = await wifiTunnelStatus()
       setTunnels(Array.isArray(res?.tunnels) ? res.tunnels : [])
+      if (res?.max_devices != null) {
+        setMaxTunnelDevices(normalizeTunnelCapacity(res.max_devices))
+      }
       return res
     } catch {
       setTunnels([])
@@ -530,6 +644,7 @@ export function useDevice(subscribe?: WsSubscribe) {
     devices, connectedDevice, scanning, scan, connect, disconnect,
     connectWifi, scanWifi, wifiScanning, wifiDevices,
     startWifiTunnel, checkTunnelStatus, stopTunnel, tunnelStatus, tunnels,
+    maxTunnelDevices,
     connectedDevices, primaryDevice,
     pinnedUdids, togglePin,
     connectionHealth,

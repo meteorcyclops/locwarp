@@ -19,7 +19,7 @@ import JoystickPad from './components/JoystickPad'
 import EtaBar from './components/EtaBar'
 import PauseControl from './components/PauseControl'
 import StatusBar from './components/StatusBar'
-import GpsWatchControl from './components/GpsWatchControl'
+import GpsWatchControl, { type GpsWatchTeleportResult } from './components/GpsWatchControl'
 import { DeviceChipRow } from './components/DeviceChipRow'
 import type { FanoutOutcome } from './hooks/useSimulation'
 import type { Coordinate as DetectedCoordinate } from './utils/coordinateDetector'
@@ -361,16 +361,10 @@ const App: React.FC = () => {
   // via the backend's own watchdog. Failures are silent (the WiFi panel
   // will surface them when the user opens it).
   //
-  // Multi-device: tries every IP/port pair in `locwarp.tunnel.savedips`
-  // in parallel (up to MAX_TUNNEL_DEVICES = 3) so a user with two or
-  // three iPhones gets all of them connecting at once, not just the
-  // most recent one. Falls back to the legacy single-IP keys for users
-  // upgrading from a build that didn't track multiple IPs yet.
-  //
-  // Group-mode safety: each per-IP attempt is independent. The whole
-  // pass is skipped if a device is already connected at trigger time
-  // (USB plug, or backend already brought a tunnel back up via its own
-  // restart logic) so we don't fight with an existing USB connection.
+  // Multi-device: tries every missing IP/port pair in `locwarp.tunnel.savedips`
+  // in parallel, up to the backend-advertised capacity. Existing USB/tunnel
+  // devices are skipped individually, so one already-connected phone never
+  // prevents its sibling from reconnecting.
   const wifiAutoConnectAttemptedRef = useRef(false)
   useEffect(() => {
     if (!ws.connected) return
@@ -411,14 +405,44 @@ const App: React.FC = () => {
     const tid = setTimeout(() => {
       ;(async () => {
         try {
-          // Skip if a device is already connected (USB plug, or backend
-          // already brought a tunnel back up via its own restart logic).
-          if (device.connectedDevices.length > 0) return
-          const status = await api.wifiTunnelStatus()
-          const alreadyTunneled = new Set(
-            (status?.tunnels || [])
-              .map((tn) => `${tn.rsd_address || ''}:${tn.rsd_port || 0}`),
+          // Read both sources at execution time rather than trusting the
+          // values captured when this effect was scheduled. This closes the
+          // startup race where USB scan or the backend watchdog restores one
+          // phone during the 1.5-second defer window.
+          const [statusResult, devicesResult] = await Promise.allSettled([
+            api.wifiTunnelStatus(),
+            api.listDevices().catch(() => []),
+          ])
+          // A transient status endpoint failure should not suppress all
+          // reconnect attempts. The device list and saved-IP candidates are
+          // still useful; capacity falls back to the platform-aware hook
+          // value until a later poll receives max_devices.
+          const status = statusResult.status === 'fulfilled'
+            ? statusResult.value
+            : { tunnels: [] as any[], max_devices: undefined }
+          const listedDevices = devicesResult.status === 'fulfilled'
+            ? devicesResult.value
+            : []
+          const connectedUdidSet = new Set<string>(
+            (Array.isArray(listedDevices) ? listedDevices : [])
+              .filter((d: any) => d?.is_connected && typeof d.udid === 'string')
+              .map((d: any) => d.udid),
           )
+          // If the list endpoint was briefly unavailable, retain the latest
+          // hook snapshot as a conservative duplicate guard.
+          for (const d of device.connectedDevices) {
+            if (d?.is_connected && d.udid) connectedUdidSet.add(d.udid)
+          }
+          const alreadyTunneledUdids = new Set<string>(
+            (status?.tunnels || [])
+              .map((tn) => tn?.udid)
+              .filter((udid): udid is string => typeof udid === 'string' && udid.length > 0),
+          )
+          const occupiedUdids = new Set([...connectedUdidSet, ...alreadyTunneledUdids])
+          const advertisedMax = Number((status as any)?.max_devices)
+          const maxDevices = Number.isFinite(advertisedMax) && advertisedMax > 0
+            ? Math.min(3, Math.max(1, Math.floor(advertisedMax)))
+            : Math.min(3, Math.max(1, Number(device.maxTunnelDevices) || 1))
           // Two sources for auto-connect candidates:
           //   1. savedips: previously-connected iPhones (UDID known)
           //   2. mDNS / subnet discover: iPhones currently broadcasting
@@ -428,13 +452,18 @@ const App: React.FC = () => {
           // through the manual save) — without it, only one iPhone keeps
           // auto-connecting on every launch even though both are paired.
           const seen = new Set<string>()
+          const seenUdids = new Set<string>()
           const uniq: Array<{ ip: string; port: number; udid?: string; ports?: number[] }> = []
           const addCand = (ip: string, port: number, udid?: string, ports?: number[]) => {
-            const key = `${ip}:${port}`
+            const normalizedIp = String(ip || '').trim()
+            const normalizedPort = Number(port) || 49152
+            if (!normalizedIp) return
+            if (udid && (occupiedUdids.has(udid) || seenUdids.has(udid))) return
+            const key = `${normalizedIp}:${normalizedPort}`
             if (seen.has(key)) return
-            if (alreadyTunneled.has(key)) return
             seen.add(key)
-            uniq.push({ ip, port, udid, ports })
+            if (udid) seenUdids.add(udid)
+            uniq.push({ ip: normalizedIp, port: normalizedPort, udid, ports })
           }
           // When the user has pinned devices, only auto-connect those UDIDs.
           // This prevents a friend's device (present on the same WiFi but
@@ -446,36 +475,111 @@ const App: React.FC = () => {
             const p = JSON.parse(localStorage.getItem('locwarp.tunnel.pinned') || '[]')
             if (Array.isArray(p)) pinnedUdids.push(...p.filter((x: any) => typeof x === 'string'))
           } catch { /* ignore */ }
-          const hasPins = pinnedUdids.length > 0
-          const filteredList = hasPins
-            ? savedList.filter((e) => e.udid && pinnedUdids.includes(e.udid))
-            : savedList
+          const uniquePinnedUdids = Array.from(new Set(pinnedUdids))
+          const hasPins = uniquePinnedUdids.length > 0
+          const occupiedCount = occupiedUdids.size
+          const availableSlots = Math.max(0, maxDevices - occupiedCount)
 
-          for (const entry of filteredList) addCand(entry.ip, entry.port, entry.udid)
-          // Skip mDNS discover when user has pins — avoids connecting to
-          // unintended devices on the same network. Discover only runs
-          // when no pins are set so new users can still auto-connect.
-          if (!hasPins) {
-            try {
-              const dres = await api.wifiTunnelDiscover()
-              for (const d of (dres?.devices || [])) {
-                // d.ports is the full open-port list from the TCP-scan
-                // fallback; a scan can't tell which one is RemotePairing,
-                // so hand them all to the backend to try in order.
-                addCand(String(d.ip), Number(d.port) || 49152, undefined, d.ports)
+          // Discovery is intentionally collected once and then reused by the
+          // per-pin fallback workers below. Older backends only return IP and
+          // port here, so the worker passes the desired UDID as a handshake
+          // hint; the backend verifies the peer before it reports success.
+          const discovered: Array<{ ip: string; port: number; udid?: string; ports?: number[] }> = []
+          try {
+            const dres = await api.wifiTunnelDiscover()
+            for (const d of (dres?.devices || [])) {
+              const discoveredUdid = typeof (d as any).udid === 'string' ? (d as any).udid : undefined
+              const ip = String(d.ip || '').trim()
+              if (!ip) continue
+              discovered.push({
+                ip,
+                port: Number(d.port) || 49152,
+                udid: discoveredUdid,
+                ports: Array.isArray(d.ports) ? d.ports : undefined,
+              })
+            }
+          } catch { /* discover failed — savedips entries still try */ }
+
+          // A reconnect pass for pinned phones is one task per missing UDID,
+          // not one task per endpoint. Each task tries its saved endpoint
+          // first, then every currently-discovered endpoint in order. This
+          // handles DHCP changes without allowing an IP-only Bonjour result
+          // to be mistaken for a different pinned phone: the backend's UDID
+          // hint/peer check is the authority. Different phones run in
+          // parallel, while endpoints for one phone remain sequential.
+          if (hasPins) {
+            const savedByUdid = new Map<string, { ip: string; port: number }>()
+            for (const entry of savedList) {
+              if (entry.udid && uniquePinnedUdids.includes(entry.udid) && !savedByUdid.has(entry.udid)) {
+                savedByUdid.set(entry.udid, { ip: entry.ip, port: entry.port })
               }
-            } catch { /* discover failed — savedips entries still try */ }
+            }
+            const newlyConnected = { count: 0 }
+            const reservations = { count: 0 }
+            const tasks: Array<() => Promise<void>> = uniquePinnedUdids
+              .filter((udid) => !occupiedUdids.has(udid))
+              .map((udid) => async () => {
+                // Reserve a slot for the full saved-IP/discovery sequence.
+                // Without this reservation, a fast success could start a
+                // queued third UDID while another initial worker was still
+                // in flight, briefly exceeding the backend's device limit.
+                if (occupiedCount + newlyConnected.count + reservations.count >= maxDevices) return
+                reservations.count += 1
+                const endpoints: Array<{ ip: string; port: number; ports?: number[] }> = []
+                const seenEndpoints = new Set<string>()
+                const addEndpoint = (ip: string, port: number, ports?: number[]) => {
+                  const key = `${ip}:${port}`
+                  if (seenEndpoints.has(key)) return
+                  seenEndpoints.add(key)
+                  endpoints.push({ ip, port, ports })
+                }
+                const saved = savedByUdid.get(udid)
+                if (saved) addEndpoint(saved.ip, saved.port)
+                for (const candidate of discovered) {
+                  // A discovered UDID is useful when it matches this pin;
+                  // an IP-only result is a fallback candidate whose identity
+                  // is verified by the UDID-hinted backend handshake.
+                  if (candidate.udid && candidate.udid !== udid) continue
+                  addEndpoint(candidate.ip, candidate.port, candidate.ports)
+                }
+                try {
+                  for (const endpoint of endpoints) {
+                    if (occupiedUdids.has(udid)) return
+                    try {
+                      await device.startWifiTunnel(endpoint.ip, endpoint.port, udid, endpoint.ports)
+                      newlyConnected.count += 1
+                      return
+                    } catch {
+                      // Saved IP may be stale; continue with the next
+                      // discovered endpoint for this same UDID.
+                    }
+                  }
+                } finally {
+                  reservations.count -= 1
+                }
+              })
+            const runWithConcurrency = async (jobs: Array<() => Promise<void>>, limit: number) => {
+              let next = 0
+              const worker = async () => {
+                while (next < jobs.length) {
+                  const index = next++
+                  await jobs[index]()
+                }
+              }
+              await Promise.all(Array.from({ length: Math.min(limit, jobs.length) }, worker))
+            }
+            await runWithConcurrency(tasks, availableSlots)
+            return
           }
-          // Cap at MAX_DEVICES the backend enforces — anything beyond
-          // would 409 anyway.
-          const limited = uniq.slice(0, 3)
+
+          // No pins: retain first-run discovery behaviour. Saved entries and
+          // IP-only discovery candidates are bounded by the advertised
+          // capacity; pinned mode above is the path that needs endpoint-level
+          // fallback after a stale DHCP address.
+          for (const entry of savedList) addCand(entry.ip, entry.port, entry.udid)
+          for (const candidate of discovered) addCand(candidate.ip, candidate.port, candidate.udid, candidate.ports)
+          const limited = uniq.slice(0, availableSlots)
           if (limited.length === 0) return
-          // Parallel: every iPhone gets a tunnel attempt at the same
-          // time so the user doesn't wait sequentially for unreachable
-          // ones to time out (~10s each). Pass entry.udid so the backend
-          // tries the right pair record FIRST — without the hint, the
-          // second device's request can stall on the wrong candidate's
-          // 8s handshake timeout and bail.
           await Promise.allSettled(
             limited.map((entry) =>
               device.startWifiTunnel(entry.ip, entry.port, entry.udid, entry.ports).catch(() => {}),
@@ -661,9 +765,8 @@ const App: React.FC = () => {
     void pushRecent(lat, lng, source === 'coord' ? 'coord_teleport' : 'teleport')
   }, [sim, device, t, showToast, pushRecent])
 
-  // Screen OCR must target one explicitly selected device. Reusing the normal
-  // group teleport handler here would fan a passive screen match out to every
-  // connected phone, which is too surprising for an automatic action.
+  // Screen OCR keeps the primary-device path compatible, while the explicit
+  // group callback below fans one observation out to a captured device set.
   const handleGpsWatchTeleport = useCallback(async (
     coordinate: DetectedCoordinate,
     targetUdid: string,
@@ -680,9 +783,37 @@ const App: React.FC = () => {
     showToast(`GPS 掃描瞬移：${coordinate.lat.toFixed(6)}, ${coordinate.lng.toFixed(6)}`)
   }, [device.connectedDevices, sim, pushRecent, showToast])
 
+  const handleGpsWatchTeleportAll = useCallback(async (
+    coordinate: DetectedCoordinate,
+    targetUdids: string[],
+  ): Promise<GpsWatchTeleportResult> => {
+    if (isRouteRunningStatus(sim.status)) throw new Error('路線執行中，已停止自動瞬移')
+    const liveUdids = new Set(device.connectedDevices.map((item) => item.udid))
+    const disconnected = targetUdids.filter((udid) => !liveUdids.has(udid))
+    if (disconnected.length > 0) {
+      return {
+        ok: [],
+        failed: disconnected.map((udid) => ({ udid, reason: '裝置已斷線' })),
+      }
+    }
+    // One backend request snapshots/readiness-checks the whole group before
+    // launching the same coordinate to every per-device worker in parallel.
+    const outcome = await api.teleportBatch(coordinate.lat, coordinate.lng, targetUdids, true)
+    const ok = outcome.ok
+    const failed = outcome.failed.map((item) => ({ udid: item.udid, reason: item.reason }))
+    if (ok.length > 0) {
+      sim.setCurrentPosition({ lat: coordinate.lat, lng: coordinate.lng })
+      setPreviewPin(null)
+      // Store one observation, not one recent-place entry per phone.
+      void pushRecent(coordinate.lat, coordinate.lng, 'coord_teleport', undefined, { reverseGeocode: false })
+    }
+    return { ok, failed }
+  }, [device.connectedDevices, sim, pushRecent])
+
   const gpsWatchTargetUdid = device.primaryDevice?.udid
     ?? device.connectedDevices[0]?.udid
     ?? null
+  const gpsWatchConnectedUdids = device.connectedDevices.map((item) => item.udid)
 
   const mapApiRef = useRef<{
     panTo: (lat: number, lng: number, zoom?: number) => void
@@ -1512,7 +1643,7 @@ const App: React.FC = () => {
           devices={device.connectedDevices}
           runtimes={sim.runtimes}
           onAdd={() => {
-            if (device.connectedDevices.length >= 2) {
+            if (device.connectedDevices.length >= 3) {
               setToastMsg(t('device.max_reached'))
               return
             }
@@ -1561,6 +1692,7 @@ const App: React.FC = () => {
             name: d.name,
             iosVersion: d.ios_version,
             connectionType: d.connection_type,
+            isConnected: d.is_connected,
             developerModeEnabled: d.developer_mode_enabled,
           }))}
           isConnected={device.connectedDevice !== null}
@@ -1573,6 +1705,7 @@ const App: React.FC = () => {
           pinnedUdids={device.pinnedUdids}
           onTogglePin={device.togglePin}
           connectionHealth={device.connectionHealth}
+          maxTunnelDevices={device.maxTunnelDevices}
         />
         </div>
         <div style={{ display: activePage === 'nav' ? 'block' : 'none' }}>
@@ -2311,10 +2444,12 @@ const App: React.FC = () => {
           onBulkPasteOpen={() => { setRoutePasteText(''); setRoutePasteOpen(true); }}
         />
         <GpsWatchControl
-          isConnected={gpsWatchTargetUdid !== null}
+          isConnected={gpsWatchConnectedUdids.length > 0}
           isRouteRunning={isRouteRunningStatus(sim.status)}
           targetUdid={gpsWatchTargetUdid}
+          connectedUdids={gpsWatchConnectedUdids}
           onTeleport={handleGpsWatchTeleport}
+          onTeleportAll={handleGpsWatchTeleportAll}
           onShowToast={showToast}
         />
         {avatarPickerOpen && (

@@ -15,6 +15,13 @@ type WatchPhase =
 
 type GpsQueuePolicy = 'latest' | 'complete'
 
+export type GpsWatchTargetMode = 'primary' | 'all'
+
+export interface GpsWatchTeleportResult {
+  ok: string[]
+  failed: Array<{ udid: string; reason: string }>
+}
+
 interface WatchStats {
   queued: number
   succeeded: number
@@ -24,6 +31,7 @@ interface WatchStats {
 }
 
 const GPS_QUEUE_POLICY_KEY = 'locwarp.gps_watch_queue_policy'
+const GPS_WATCH_TARGET_MODE_KEY = 'locwarp.gps_watch_target_mode'
 const EMPTY_STATS: WatchStats = { queued: 0, succeeded: 0, dropped: 0, expired: 0, framesSkipped: 0 }
 // Keep two matching OCR frames as the safety gate. This interval only limits
 // how quickly a confirmed new coordinate may follow the previous one.
@@ -36,6 +44,17 @@ const storedQueuePolicy = (): GpsQueuePolicy => {
     return 'latest'
   }
 }
+
+const storedTargetMode = (): GpsWatchTargetMode => {
+  try {
+    return localStorage.getItem(GPS_WATCH_TARGET_MODE_KEY) === 'all' ? 'all' : 'primary'
+  } catch {
+    return 'primary'
+  }
+}
+
+const uniqueSortedUdids = (udids: string[]): string[] =>
+  Array.from(new Set(udids.filter(Boolean))).sort()
 
 const createDetector = (queuePolicy: GpsQueuePolicy) => new CoordinateAutoDetector({
   stabilityFrames: 2,
@@ -60,7 +79,9 @@ interface Props {
   isConnected: boolean
   isRouteRunning: boolean
   targetUdid: string | null
+  connectedUdids?: string[]
   onTeleport: (coordinate: Coordinate, targetUdid: string) => Promise<void>
+  onTeleportAll?: (coordinate: Coordinate, targetUdids: string[]) => Promise<GpsWatchTeleportResult>
   onShowToast: (message: string, duration?: number) => void
 }
 
@@ -78,7 +99,9 @@ const GpsWatchControl: React.FC<Props> = ({
   isConnected,
   isRouteRunning,
   targetUdid,
+  connectedUdids = [],
   onTeleport,
+  onTeleportAll,
   onShowToast,
 }) => {
   const [phase, setPhase] = useState<WatchPhase>('idle')
@@ -86,14 +109,25 @@ const GpsWatchControl: React.FC<Props> = ({
   const [ambiguous, setAmbiguous] = useState<Coordinate[]>([])
   const [lastCoordinate, setLastCoordinate] = useState<Coordinate | null>(null)
   const [queuePolicy, setQueuePolicy] = useState<GpsQueuePolicy>(storedQueuePolicy)
+  const [targetMode, setTargetMode] = useState<GpsWatchTargetMode>(storedTargetMode)
+  const [delivery, setDelivery] = useState<{ ok: number; total: number; failed: number } | null>(null)
   const [stats, setStats] = useState<WatchStats>(EMPTY_STATS)
   const detectorRef = useRef(createDetector(queuePolicy))
   const teleportRef = useRef(onTeleport)
   const connectedRef = useRef(isConnected)
+  const connectedUdidsRef = useRef<string[]>(connectedUdids)
   const routeRunningRef = useRef(isRouteRunning)
   const stoppingRef = useRef(false)
   const sessionRef = useRef(0)
   const targetUdidRef = useRef<string | null>(null)
+  const sessionTargetsRef = useRef<string[]>([])
+  const targetModeRef = useRef<GpsWatchTargetMode>(targetMode)
+  const teleportAllRef = useRef(onTeleportAll)
+  // A group delivery is atomic from the watcher user's perspective. If one
+  // member cannot accept the coordinate, preserve the n/N failure notice
+  // through helper teardown instead of silently continuing with a divergent
+  // subset of the phones.
+  const terminalNoticeRef = useRef<string | null>(null)
   // Teardown is complete only after Electron reports `stopped` or status
   // reconciliation observes an idle helper. This replaces the old
   // ignoreStopped flag, which could swallow the only final event after Esc.
@@ -104,7 +138,10 @@ const GpsWatchControl: React.FC<Props> = ({
 
   useEffect(() => { teleportRef.current = onTeleport }, [onTeleport])
   useEffect(() => { connectedRef.current = isConnected }, [isConnected])
+  useEffect(() => { connectedUdidsRef.current = connectedUdids }, [connectedUdids])
   useEffect(() => { routeRunningRef.current = isRouteRunning }, [isRouteRunning])
+  useEffect(() => { targetModeRef.current = targetMode }, [targetMode])
+  useEffect(() => { teleportAllRef.current = onTeleportAll }, [onTeleportAll])
 
   const publishStats = useCallback((patch: Partial<WatchStats> = {}) => {
     const snapshot = detectorRef.current.getSnapshot()
@@ -128,6 +165,23 @@ const GpsWatchControl: React.FC<Props> = ({
     void window.electronAPI?.gpsWatch?.updateStatus(payload).catch(() => {})
   }, [])
 
+  const currentTargetUdids = useCallback((): string[] => {
+    if (targetModeRef.current === 'all') {
+      // All-mode is a strict group session: membership is captured at start
+      // and cannot silently shrink or grow while OCR frames are in flight.
+      return sessionTargetsRef.current.length > 0
+        ? [...sessionTargetsRef.current]
+        : uniqueSortedUdids(connectedUdidsRef.current)
+    }
+    return targetUdidRef.current ? [targetUdidRef.current] : []
+  }, [])
+
+  const changeTargetMode = useCallback((next: GpsWatchTargetMode) => {
+    targetModeRef.current = next
+    setTargetMode(next)
+    try { localStorage.setItem(GPS_WATCH_TARGET_MODE_KEY, next) } catch { /* ignore */ }
+  }, [])
+
   const changeQueuePolicy = useCallback((next: GpsQueuePolicy) => {
     queuePolicyRef.current = next
     setQueuePolicy(next)
@@ -136,10 +190,16 @@ const GpsWatchControl: React.FC<Props> = ({
   }, [])
 
   const stop = useCallback(async (reveal = false, resetUi = true) => {
+    // Capture the notice before teardown can emit `stopped` and clear the
+    // ref. This lets strict group failures finish in `error` while ordinary
+    // Esc/user stops still finish in `idle`.
+    const terminalNotice = terminalNoticeRef.current
     stoppingRef.current = true
     stopPendingRef.current = true
     sessionRef.current += 1
+    sessionTargetsRef.current = []
     detectorRef.current.reset()
+    setDelivery(null)
     if (resetUi) {
       setPhase('stopping')
       setDetail('GPS 畫面監看已停止，正在釋放擷取資源…')
@@ -151,9 +211,35 @@ const GpsWatchControl: React.FC<Props> = ({
       stopPendingRef.current = false
       stoppingRef.current = false
       if (resetUi) {
-        setPhase('idle')
-        setDetail('支援十進位、度分、度分秒，自動轉換')
+        if (terminalNotice) {
+          setPhase('error')
+          setDetail(terminalNotice)
+        } else {
+          setPhase('idle')
+          setDetail('支援十進位、度分、度分秒，自動轉換')
+        }
       }
+    }
+  }, [])
+
+  // Keep the group contract local to the renderer. Newer App code can use a
+  // single backend-aware fan-out callback; older callers remain compatible by
+  // falling back to parallel single-device callbacks with the same coordinate.
+  const dispatchAll = useCallback(async (
+    coordinate: Coordinate,
+    targetUdids: string[],
+  ): Promise<GpsWatchTeleportResult> => {
+    if (teleportAllRef.current) {
+      return teleportAllRef.current(coordinate, targetUdids)
+    }
+    const results = await Promise.allSettled(
+      targetUdids.map((udid) => teleportRef.current(coordinate, udid)),
+    )
+    return {
+      ok: results.flatMap((result, index) => result.status === 'fulfilled' ? [targetUdids[index]] : []),
+      failed: results.flatMap((result, index) => result.status === 'rejected'
+        ? [{ udid: targetUdids[index], reason: result.reason?.message || String(result.reason) }]
+        : []),
     }
   }, [])
 
@@ -243,23 +329,68 @@ const GpsWatchControl: React.FC<Props> = ({
         const coordinate = result.coordinate
         const attemptId = result.attemptId
         const session = sessionRef.current
+        const modeForSession = targetModeRef.current
+        const sessionTargets = currentTargetUdids()
         setPhase('teleporting')
-        setDetail(`瞬移中 · ${formatCoordinate(coordinate)}`)
-        const sessionTarget = targetUdidRef.current
-        if (!sessionTarget) {
+        setDetail(modeForSession === 'all'
+          ? `同步瞬移中 · ${formatCoordinate(coordinate)}`
+          : `瞬移中 · ${formatCoordinate(coordinate)}`)
+        if (sessionTargets.length === 0) {
           detectorRef.current.markFailed(attemptId)
           setPhase('error')
           setDetail('目標裝置已斷線，GPS 畫面監看已停止')
           void stop(true, false)
           return
         }
-        void teleportRef.current(coordinate, sessionTarget).then(() => {
+        const deliveryPromise = modeForSession === 'all'
+          ? dispatchAll(coordinate, sessionTargets)
+          : teleportRef.current(coordinate, sessionTargets[0]).then(() => ({
+            ok: [sessionTargets[0]],
+            failed: [],
+          }))
+        void deliveryPromise.then((outcome) => {
           if (session !== sessionRef.current || stoppingRef.current) return
-          detectorRef.current.markSucceeded(attemptId)
-          publishStats({ succeeded: statsRef.current.succeeded + 1 })
+          const succeeded = outcome.ok.length
+          const failed = outcome.failed.length
+          setDelivery({ ok: succeeded, total: sessionTargets.length, failed })
+          const failureDetail = failed > 0
+            ? outcome.failed
+              .map((item) => `${item.udid.slice(0, 6)}: ${item.reason}`)
+              .join('；')
+            : ''
+
+          // Group mode is deliberately strict: a partial fan-out is not a
+          // successful observation. Stop the watcher before the next OCR
+          // frame can move only the still-healthy phone, while keeping the
+          // source screen visible (reveal=false) and reporting n/N.
+          if (modeForSession === 'all' && failed > 0) {
+            detectorRef.current.markFailed(attemptId)
+            const message = `同步停止 · ${succeeded}/${sessionTargets.length} 台已送出${failureDetail ? ` · ${failureDetail}` : ''}`
+            setLastCoordinate(coordinate)
+            setPhase('error')
+            setDetail(message)
+            onShowToast(`GPS 同步瞬移部分失敗：${succeeded}/${sessionTargets.length} 台，已停止監看`, 8000)
+            terminalNoticeRef.current = message
+            void stop(false, true).catch(() => {})
+            return
+          }
+
+          if (succeeded > 0) {
+            detectorRef.current.markSucceeded(attemptId)
+            publishStats({ succeeded: statsRef.current.succeeded + 1 })
+          } else {
+            detectorRef.current.markFailed(attemptId)
+          }
           setLastCoordinate(coordinate)
           setPhase('watching')
-          setDetail(`監看中 · 上次 ${formatCoordinate(coordinate)}`)
+          if (failed > 0) {
+            setDetail(`監看中 · ${succeeded}/${sessionTargets.length} 台已送出 · ${failureDetail}`)
+            onShowToast(`GPS 同步瞬移部分失敗：${succeeded}/${sessionTargets.length} 台`, 6000)
+          } else {
+            setDetail(modeForSession === 'all'
+              ? `監看中 · ${succeeded}/${sessionTargets.length} 台已送出 · 上次 ${formatCoordinate(coordinate)}`
+              : `監看中 · 上次 ${formatCoordinate(coordinate)}`)
+          }
         }).catch((error: any) => {
           if (session !== sessionRef.current || stoppingRef.current) return
           detectorRef.current.markFailed(attemptId)
@@ -267,7 +398,14 @@ const GpsWatchControl: React.FC<Props> = ({
           setPhase('error')
           setDetail(message)
           onShowToast(`GPS 自動瞬移失敗：${message}`, 8000)
-          void stop(true, false)
+          if (modeForSession === 'all') {
+            terminalNoticeRef.current = message
+            // Keep the watched source app in front for every strict-group
+            // failure, including a server-side preflight rejection.
+            void stop(false, true).catch(() => {})
+          } else {
+            void stop(true, false)
+          }
         })
         return
       }
@@ -282,10 +420,17 @@ const GpsWatchControl: React.FC<Props> = ({
       if (event.event === 'stopped') {
         stopPendingRef.current = false
         stoppingRef.current = false
-        setPhase('idle')
-        setDetail(event.reason === 'escape' || event.reason === 'hotkey'
-          ? '已由快捷鍵停止 GPS 監看'
-          : 'GPS 畫面監看已停止')
+        const terminalNotice = terminalNoticeRef.current
+        terminalNoticeRef.current = null
+        if (terminalNotice) {
+          setPhase('error')
+          setDetail(terminalNotice)
+        } else {
+          setPhase('idle')
+          setDetail(event.reason === 'escape' || event.reason === 'hotkey'
+            ? '已由快捷鍵停止 GPS 監看'
+            : 'GPS 畫面監看已停止')
+        }
       }
     })
   }, [onShowToast, publishStats, stop])
@@ -378,6 +523,26 @@ const GpsWatchControl: React.FC<Props> = ({
     void stop(true, false)
   }, [onShowToast, phase, stop, targetUdid])
 
+  useEffect(() => {
+    const isActive = phase === 'selecting'
+      || phase === 'starting'
+      || phase === 'baseline'
+      || phase === 'watching'
+      || phase === 'teleporting'
+    if (!isActive || targetMode !== 'all' || sessionTargetsRef.current.length < 2) return
+    const current = uniqueSortedUdids(connectedUdids)
+    const expected = sessionTargetsRef.current
+    if (current.length === expected.length && expected.every((udid) => current.includes(udid))) return
+    const message = '同步群組裝置清單已變更，GPS 畫面監看已停止'
+    setPhase('error')
+    setDetail(message)
+    onShowToast(message, 8000)
+    terminalNoticeRef.current = message
+    // Keep the source screen in front so the user can fix the connection
+    // without LocWarp stealing focus while this watcher is torn down.
+    void stop(false, true).catch(() => {})
+  }, [connectedUdids, onShowToast, phase, stop, targetMode])
+
   const start = useCallback(async () => {
     const gpsWatch = window.electronAPI?.gpsWatch
     if (!gpsWatch) {
@@ -395,11 +560,21 @@ const GpsWatchControl: React.FC<Props> = ({
 
     stoppingRef.current = false
     stopPendingRef.current = false
+    terminalNoticeRef.current = null
     const session = sessionRef.current + 1
     sessionRef.current = session
     targetUdidRef.current = targetUdid
+    const initialTargets = targetModeRef.current === 'all'
+      ? uniqueSortedUdids(connectedUdidsRef.current)
+      : (targetUdid ? [targetUdid] : [])
+    if (targetModeRef.current === 'all' && initialTargets.length < 2) {
+      onShowToast('全部裝置模式至少需要兩台已連線的 iPhone')
+      return
+    }
+    sessionTargetsRef.current = initialTargets
     detectorRef.current = createDetector(queuePolicyRef.current)
     statsRef.current = EMPTY_STATS
+    setDelivery(null)
     setStats(EMPTY_STATS)
     lastPublishedStatusRef.current = ''
     publishStats(EMPTY_STATS)
@@ -447,23 +622,53 @@ const GpsWatchControl: React.FC<Props> = ({
   }, [isConnected, isRouteRunning, onShowToast, targetUdid])
 
   const chooseAmbiguous = useCallback(async (coordinate: Coordinate) => {
+    const modeForSession = targetModeRef.current
+    const sessionTargets = currentTargetUdids()
     setPhase('teleporting')
-    setDetail(`瞬移中 · ${formatCoordinate(coordinate)}`)
+    setDetail(modeForSession === 'all'
+      ? `同步瞬移中 · ${formatCoordinate(coordinate)}`
+      : `瞬移中 · ${formatCoordinate(coordinate)}`)
     try {
-      const sessionTarget = targetUdidRef.current
-      if (!sessionTarget) throw new Error('目標 iPhone 已斷線')
-      await onTeleport(coordinate, sessionTarget)
+      if (sessionTargets.length === 0) throw new Error('目標 iPhone 已斷線')
+      if (modeForSession === 'all') {
+        if (sessionTargets.length < 2) throw new Error('同步群組至少需要兩台已連線的 iPhone')
+        const outcome = await dispatchAll(coordinate, sessionTargets)
+        const succeeded = outcome.ok.length
+        const failed = outcome.failed.length
+        setDelivery({ ok: succeeded, total: sessionTargets.length, failed })
+        if (failed > 0) {
+          const failureDetail = outcome.failed
+            .map((item) => `${item.udid.slice(0, 6)}: ${item.reason}`)
+            .join('；')
+          const message = `同步停止 · ${succeeded}/${sessionTargets.length} 台已送出${failureDetail ? ` · ${failureDetail}` : ''}`
+          setPhase('error')
+          setDetail(message)
+          onShowToast(`GPS 同步瞬移部分失敗：${succeeded}/${sessionTargets.length} 台，已停止監看`, 8000)
+          terminalNoticeRef.current = message
+          await stop(false, true)
+          return
+        }
+      } else {
+        await onTeleport(coordinate, sessionTargets[0])
+      }
       setLastCoordinate(coordinate)
       setAmbiguous([])
-      setPhase('idle')
-      setDetail(`已瞬移 · ${formatCoordinate(coordinate)}；可重新框選`)
+      // If a legacy detector surfaces an ambiguous choice during an active
+      // group session, keep the continuous watcher alive after the explicit
+      // selection. A standalone one-shot choice retains the old idle result.
+      const keepWatching = modeForSession === 'all' && sessionTargets.length > 0
+        && sessionRef.current > 0 && !stoppingRef.current
+      setPhase(keepWatching ? 'watching' : 'idle')
+      setDetail(keepWatching
+        ? `監看中 · ${formatCoordinate(coordinate)}`
+        : `已瞬移 · ${formatCoordinate(coordinate)}；可重新框選`)
     } catch (error: any) {
       const message = error?.message || '瞬移失敗'
       setPhase('error')
       setDetail(message)
       onShowToast(`GPS 自動瞬移失敗：${message}`, 8000)
     }
-  }, [onTeleport, onShowToast])
+  }, [currentTargetUdids, dispatchAll, onShowToast, onTeleport, stop])
 
   const active = phase !== 'idle' && phase !== 'error' && phase !== 'ambiguous'
   const unavailable = window.electronAPI?.platform !== 'darwin'
@@ -487,6 +692,22 @@ const GpsWatchControl: React.FC<Props> = ({
           title="依序處理 3 秒內出現的所有穩定座標"
         >完整</button>
       </div>
+      <div className="gps-watch-mode gps-watch-target-mode" aria-label="GPS 目標裝置">
+        <button
+          className={targetMode === 'primary' ? 'selected' : ''}
+          disabled={active}
+          aria-pressed={targetMode === 'primary'}
+          onClick={() => changeTargetMode('primary')}
+          title="只瞬移主裝置"
+        >主裝置</button>
+        <button
+          className={targetMode === 'all' ? 'selected' : ''}
+          disabled={active || connectedUdids.length < 2}
+          aria-pressed={targetMode === 'all'}
+          onClick={() => changeTargetMode('all')}
+          title="同一座標同步瞬移全部已連線裝置"
+        >全部 {connectedUdids.length} 台</button>
+      </div>
       <button
         className={`gps-watch-button${active ? ' active' : ''}`}
         onClick={() => { active ? void stop(false) : void start() }}
@@ -509,6 +730,7 @@ const GpsWatchControl: React.FC<Props> = ({
             <em>排 {stats.queued}</em>
             <em>成 {stats.succeeded}</em>
             <em>略 {skipped}</em>
+            {delivery && <em>送 {delivery.ok}/{delivery.total}</em>}
             {stats.framesSkipped > 0 && <em>幀 {stats.framesSkipped}</em>}
           </span>
         )}

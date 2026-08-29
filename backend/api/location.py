@@ -27,6 +27,47 @@ router = APIRouter(prefix="/api/location", tags=["location"])
 
 _engine_recovery_lock = asyncio.Lock()
 
+
+class BatchTeleportRequest(BaseModel):
+    lat: float
+    lng: float
+    udids: list[str]
+    require_idle: bool = True
+
+
+def _lookup_engine(app_state, udid: str | None):
+    """Look up an explicitly requested engine without falling back to primary.
+
+    usbmux/RSD versions have differed in UDID casing.  Recovery must tolerate
+    that cosmetic difference while still preserving the caller's device
+    identity; ``get_engine(None)`` is intentionally never used for an
+    explicit target.
+    """
+    if udid is None:
+        return app_state.get_engine(None)
+    engine = app_state.get_engine(udid)
+    if engine is not None:
+        return engine
+    target = str(udid).lower()
+    for stored_udid, candidate in app_state.simulation_engines.items():
+        if str(stored_udid).lower() == target:
+            return candidate
+    return None
+
+
+def _lookup_connection_key(dm, udid: str | None) -> str | None:
+    """Return the live connection-table key for an explicit UDID."""
+    if udid is None:
+        return None
+    if udid in dm._connections:
+        return udid
+    target = str(udid).lower()
+    return next(
+        (stored for stored in dm._connections if str(stored).lower() == target),
+        None,
+    )
+
+
 async def _engine(udid: str | None = None):
     """Return an engine, allowing only one lazy recovery at a time.
 
@@ -37,12 +78,12 @@ async def _engine(udid: str | None = None):
     """
     from main import app_state
 
-    eng = app_state.get_engine(udid)
+    eng = _lookup_engine(app_state, udid)
     if eng is not None:
         return eng
 
     async with _engine_recovery_lock:
-        eng = app_state.get_engine(udid)
+        eng = _lookup_engine(app_state, udid)
         if eng is not None:
             return eng
         return await _recover_engine(udid)
@@ -60,7 +101,7 @@ async def _recover_engine(udid: str | None = None):
 
     # Direct hit on the requested udid.
     if udid is not None:
-        eng = app_state.get_engine(udid)
+        eng = _lookup_engine(app_state, udid)
         if eng is not None:
             return eng
 
@@ -71,6 +112,9 @@ async def _recover_engine(udid: str | None = None):
 
     # Pick a target UDID — requested udid first, then already-connected, then any discoverable device.
     target_udid = udid or next(iter(dm._connections.keys()), None)
+    target_connection_key = _lookup_connection_key(dm, target_udid)
+    if target_connection_key is not None:
+        target_udid = target_connection_key
     if target_udid is None:
         import asyncio as _asyncio
         for attempt in range(10):
@@ -95,24 +139,35 @@ async def _recover_engine(udid: str | None = None):
     _log.info("simulation_engine missing; attempt 1 (rebuild) for %s", target_udid)
     try:
         await app_state.create_engine_for_device(target_udid)
-        if app_state.simulation_engine is not None:
+        if _lookup_engine(app_state, target_udid) is not None:
             _log.info("Engine rebuild succeeded on attempt 1")
-            return app_state.simulation_engine
+            return _lookup_engine(app_state, target_udid)
     except Exception:
         _log.exception("Engine rebuild (attempt 1) failed for %s", target_udid)
 
     # Attempt 2: hard reset — disconnect + reconnect + rebuild
     _log.info("attempt 2 (hard reset) for %s", target_udid)
     try:
-        try:
-            await dm.disconnect(target_udid, clear_location=False)
-        except Exception:
-            _log.warning("disconnect during hard reset failed; proceeding", exc_info=True)
-        await dm.connect(target_udid)
-        await app_state.create_engine_for_device(target_udid)
-        if app_state.simulation_engine is not None:
+        # A worker-backed WiFi connection owns the RSD/DVT objects in its
+        # child process.  Calling the generic USB ``connect`` path here would
+        # tear that worker down and can silently switch the target transport.
+        # Route Network recovery through the per-UDID worker watchdog instead.
+        current_key = _lookup_connection_key(dm, target_udid) or target_udid
+        current_conn = dm._connections.get(current_key)
+        if current_conn is not None and getattr(current_conn, "connection_type", "") == "Network":
+            recovered = await dm.full_reconnect(current_key)
+            if not recovered:
+                raise RuntimeError("WiFi worker reconnect did not recover the target")
+        else:
+            try:
+                await dm.disconnect(current_key, clear_location=False)
+            except Exception:
+                _log.warning("disconnect during hard reset failed; proceeding", exc_info=True)
+            await dm.connect(current_key)
+        await app_state.create_engine_for_device(current_key)
+        if _lookup_engine(app_state, current_key) is not None:
             _log.info("Engine rebuild succeeded on attempt 2")
-            return app_state.simulation_engine
+            return _lookup_engine(app_state, current_key)
     except Exception:
         _log.exception("Engine rebuild (attempt 2, hard reset) failed for %s", target_udid)
 
@@ -377,6 +432,88 @@ async def teleport(req: TeleportRequest):
         await cooldown.start(old_pos.lat, old_pos.lng, req.lat, req.lng)
 
     return {"status": "ok", "lat": req.lat, "lng": req.lng}
+
+
+@router.post("/teleport/batch")
+async def teleport_batch(req: BatchTeleportRequest):
+    """Dispatch one GPS observation to a fixed device snapshot in parallel.
+
+    The preflight resolves every requested engine and verifies the complete
+    group is idle before the first write starts. Delivery is then launched in
+    the same event-loop turn and aggregated per UDID. DVT itself cannot offer
+    a distributed transaction across phones, so the response explicitly
+    reports partial delivery; GPS Watch treats any partial result as terminal
+    and stops before another coordinate can widen the divergence.
+    """
+    unique_udids: list[str] = []
+    seen: set[str] = set()
+    for raw_udid in req.udids:
+        udid = str(raw_udid or "").strip()
+        key = udid.lower()
+        if not udid or key in seen:
+            continue
+        seen.add(key)
+        unique_udids.append(udid)
+    if len(unique_udids) < 2 or len(unique_udids) > 3:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "invalid_group_size",
+                "message": "同步 GPS 需要 2 至 3 台不重複的裝置",
+            },
+        )
+
+    engines = await asyncio.gather(*(_engine(udid) for udid in unique_udids))
+    if req.require_idle:
+        busy = [
+            {"udid": udid, "state": engine.state.value}
+            for udid, engine in zip(unique_udids, engines)
+            if engine.state != SimulationState.IDLE
+        ]
+        if busy:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "group_not_idle",
+                    "message": "至少一台裝置正在執行路線，未送出同步座標",
+                    "devices": busy,
+                },
+            )
+
+    async def deliver(udid: str) -> dict:
+        try:
+            await teleport(TeleportRequest(
+                lat=req.lat,
+                lng=req.lng,
+                udid=udid,
+                require_idle=req.require_idle,
+            ))
+            return {"udid": udid, "ok": True}
+        except HTTPException as exc:
+            detail = exc.detail
+            if isinstance(detail, dict):
+                reason = str(detail.get("message") or detail.get("code") or detail)
+            else:
+                reason = str(detail)
+            return {"udid": udid, "ok": False, "reason": reason, "status_code": exc.status_code}
+        except Exception as exc:
+            return {"udid": udid, "ok": False, "reason": str(exc) or type(exc).__name__}
+
+    outcomes = await asyncio.gather(*(deliver(udid) for udid in unique_udids))
+    succeeded = [item["udid"] for item in outcomes if item["ok"]]
+    failed = [
+        {key: value for key, value in item.items() if key != "ok"}
+        for item in outcomes
+        if not item["ok"]
+    ]
+    return {
+        "status": "ok" if not failed else "partial_failed",
+        "ok": succeeded,
+        "failed": failed,
+        "total": len(unique_udids),
+        "lat": req.lat,
+        "lng": req.lng,
+    }
 
 
 # Module-level background task set to keep strong references to fire-and-forget

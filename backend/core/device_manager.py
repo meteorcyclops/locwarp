@@ -121,6 +121,12 @@ class _ActiveConnection:
     owns_rsd: bool = True  # False when TunnelRunner owns a userspace RSD
     location_service: Optional[LocationService] = None
     usbmux_lockdown: object = None  # Original lockdown client (for legacy fallback on iOS 17+)
+    # macOS root-free WiFi worker owns the actual RSD/DVT objects in a child
+    # process.  The main process keeps only this opaque controller and the
+    # LocationService-compatible proxy; it must never attempt to close or
+    # reconnect the child's RSD directly.
+    worker: object = None
+    external_location_service: bool = False
 
 
 class DeviceManager:
@@ -141,6 +147,32 @@ class DeviceManager:
         self._connections: Dict[str, _ActiveConnection] = {}
         self._lock = asyncio.Lock()
         self._connect_locks: Dict[str, asyncio.Lock] = {}
+
+    @staticmethod
+    def _identity_key(udid: str | None) -> str:
+        """Normalize a UDID for identity comparisons without changing UI text."""
+        return str(udid or "").strip().casefold()
+
+    def _connection_key(self, udid: str | None) -> str | None:
+        """Find the stored connection key case-insensitively.
+
+        usbmuxd, RemotePairing, and cached worker metadata can disagree only
+        in casing. Treating those as different devices was enough to create a
+        duplicate connection and later disconnect the wrong tunnel.
+        """
+        if udid is None:
+            return None
+        if udid in self._connections:
+            return udid
+        wanted = self._identity_key(udid)
+        return next(
+            (stored for stored in self._connections if self._identity_key(stored) == wanted),
+            None,
+        )
+
+    def _connection_for(self, udid: str | None) -> _ActiveConnection | None:
+        key = self._connection_key(udid)
+        return self._connections.get(key) if key is not None else None
 
     # ------------------------------------------------------------------
     # Discovery
@@ -170,19 +202,20 @@ class DeviceManager:
             try:
                 conn_type = getattr(raw, "connection_type", "USB")
                 # If we already saw this device via USB, skip the Network duplicate
-                if raw.serial in seen_udids:
+                raw_identity = self._identity_key(raw.serial)
+                if raw_identity in seen_udids:
                     # But upgrade to USB if this entry is USB (prefer USB info)
                     if conn_type == "USB":
                         for d in devices:
-                            if d.udid == raw.serial:
+                            if self._identity_key(d.udid) == raw_identity:
                                 d.connection_type = "USB"
                     continue
-                seen_udids.add(raw.serial)
+                seen_udids.add(raw_identity)
 
                 lockdown = await create_using_usbmux(serial=raw.serial)
                 all_values = lockdown.all_values
                 # If device is already connected, report the active connection type
-                active_conn = self._connections.get(raw.serial)
+                active_conn = self._connection_for(raw.serial)
                 if active_conn:
                     conn_type = active_conn.connection_type
                 device_name = all_values.get("DeviceName", "Unknown")
@@ -193,7 +226,7 @@ class DeviceManager:
                     ios_version=all_values.get("ProductVersion", "0.0"),
                     connection_type=conn_type,
                 )
-                info.is_connected = raw.serial in self._connections
+                info.is_connected = self._connection_key(raw.serial) is not None
                 # Query Developer Mode status (iOS 16+). Tolerate failure —
                 # None means "unknown", frontend will hide the reveal button.
                 try:
@@ -220,9 +253,9 @@ class DeviceManager:
         # been kicked. Compare against actually-added udids (not
         # `seen_udids` which is set early for raw-entry dedup) so a
         # failed lockdown query above doesn't suppress the fallback.
-        added_udids = {d.udid for d in devices}
+        added_udids = {self._identity_key(d.udid) for d in devices}
         for udid, conn in self._connections.items():
-            if udid in added_udids:
+            if self._identity_key(udid) in added_udids:
                 continue
             try:
                 info = DeviceInfo(
@@ -254,7 +287,7 @@ class DeviceManager:
         initial ``_connections`` check and build competing CoreDevice
         tunnels, which makes macOS tear the phone's NCM interface down again.
         """
-        key = udid.lower()
+        key = self._identity_key(udid)
         connect_lock = self._connect_locks.setdefault(key, asyncio.Lock())
         async with connect_lock:
             try:
@@ -275,7 +308,7 @@ class DeviceManager:
         * **iOS 16.x** -- plain lockdown over usbmux + legacy location service.
         """
         async with self._lock:
-            if udid in self._connections:
+            if self._connection_key(udid) is not None:
                 logger.info("Device %s is already connected", udid)
                 return
 
@@ -284,7 +317,7 @@ class DeviceManager:
         try:
             raw_devices = await list_devices()
             for raw in raw_devices:
-                if raw.serial == udid:
+                if self._identity_key(raw.serial) == self._identity_key(udid):
                     connection_type = getattr(raw, "connection_type", "USB")
                     # Prefer USB if device shows up as both
                     if connection_type == "USB":
@@ -318,7 +351,21 @@ class DeviceManager:
             conn.name = device_name
 
             async with self._lock:
-                self._connections[udid] = conn
+                existing_key = self._connection_key(udid)
+                if existing_key is not None:
+                    # A concurrent discovery may have inserted the same
+                    # identity with different casing while the transport was
+                    # being established. Keep one connection record and let
+                    # the duplicate caller close its just-created handles.
+                    duplicate = existing_key
+                else:
+                    self._connections[udid] = conn
+                    duplicate = None
+
+            if duplicate is not None:
+                await self._close_connection_resources(conn, udid)
+                logger.info("Device %s was connected concurrently; reusing %s", udid, duplicate)
+                return
 
             logger.info("Connected to %s (iOS %s) via %s", udid, ios_version_str, connection_type)
         except BaseException:
@@ -439,6 +486,55 @@ class DeviceManager:
     # Disconnection
     # ------------------------------------------------------------------
 
+    async def _close_connection_resources(self, conn: _ActiveConnection, udid: str) -> None:
+        """Close a connection object that lost a duplicate-race publish.
+
+        This path must not call ``disconnect(udid)`` because that would pop
+        the already-published connection with the same case-insensitive
+        identity. It mirrors the resource order used by disconnect().
+        """
+        if conn.dvt_provider is not None:
+            try:
+                await conn.dvt_provider.__aexit__(None, None, None)
+            except Exception:
+                logger.exception("Error closing duplicate DvtProvider for %s", udid)
+        if conn.worker is not None:
+            try:
+                stop_worker = getattr(conn.worker, "stop", None)
+                if callable(stop_worker):
+                    await stop_worker()
+            except Exception:
+                logger.exception("Error stopping duplicate WiFi worker for %s", udid)
+        if conn.rsd is not None and conn.userspace_tunnel is None and conn.owns_rsd:
+            try:
+                await conn.rsd.close()
+            except Exception:
+                logger.exception("Error closing duplicate RSD for %s", udid)
+        if conn.userspace_tunnel is not None:
+            try:
+                await conn.userspace_tunnel.aclose()
+            except Exception:
+                logger.exception("Error closing duplicate userspace tunnel for %s", udid)
+        if conn.tunnel_context is not None:
+            try:
+                await conn.tunnel_context.__aexit__(None, None, None)
+            except Exception:
+                logger.exception("Error closing duplicate tunnel for %s", udid)
+        if conn.tunnel_proxy is not None:
+            try:
+                maybe_awaitable = conn.tunnel_proxy.close()
+                if inspect.isawaitable(maybe_awaitable):
+                    await maybe_awaitable
+            except Exception:
+                logger.exception("Error closing duplicate tunnel proxy for %s", udid)
+        if conn.usbmux_lockdown is not None and conn.usbmux_lockdown is not conn.rsd:
+            try:
+                maybe_awaitable = conn.usbmux_lockdown.close()
+                if inspect.isawaitable(maybe_awaitable):
+                    await maybe_awaitable
+            except Exception:
+                logger.exception("Error closing duplicate lockdown for %s", udid)
+
     async def disconnect(self, udid: str, *, clear_location: bool = True) -> None:
         """Tear down the connection and clean up resources for *udid*.
 
@@ -454,7 +550,8 @@ class DeviceManager:
         field logs ("DVT channel dropped during clear ... reconnecting").
         """
         async with self._lock:
-            conn = self._connections.pop(udid, None)
+            connection_key = self._connection_key(udid)
+            conn = self._connections.pop(connection_key, None) if connection_key is not None else None
 
         if conn is None:
             logger.warning("Disconnect requested for unknown device %s", udid)
@@ -480,6 +577,18 @@ class DeviceManager:
                 await conn.dvt_provider.__aexit__(None, None, None)
             except Exception:
                 logger.exception("Error closing DvtProvider for %s", udid)
+
+        # A worker-backed WiFi connection owns the RSD/DVT process outside the
+        # backend.  Stop it here as a final shutdown safety net as well as in
+        # api.device's registry teardown; stop() is idempotent, so either
+        # owner can win a concurrent cleanup race without leaking a child.
+        if conn.worker is not None:
+            try:
+                stop_worker = getattr(conn.worker, "stop", None)
+                if callable(stop_worker):
+                    await stop_worker()
+            except Exception:
+                logger.exception("Error stopping WiFi worker for %s", udid)
 
         # Close RSD.
         if conn.rsd is not None and conn.userspace_tunnel is None and conn.owns_rsd:
@@ -540,7 +649,8 @@ class DeviceManager:
         The service is cached on the connection so subsequent calls are cheap.
         """
         async with self._lock:
-            conn = self._connections.get(udid)
+            connection_key = self._connection_key(udid)
+            conn = self._connections.get(connection_key) if connection_key is not None else None
 
         if conn is None:
             raise RuntimeError(
@@ -696,7 +806,8 @@ class DeviceManager:
 
     async def mount_personalized_ddi(self, udid: str) -> dict[str, object]:
         async with self._lock:
-            conn = self._connections.get(udid)
+            connection_key = self._connection_key(udid)
+            conn = self._connections.get(connection_key) if connection_key is not None else None
 
         if conn is None:
             raise DDIMountError("device_not_connected", f"找不到已連線裝置: {udid}")
@@ -884,12 +995,95 @@ class DeviceManager:
     # WiFi connection (iOS 17+ tunnel only)
     # ------------------------------------------------------------------
 
+    async def _adopt_wifi_worker(self, worker: object) -> DeviceInfo:
+        """Adopt one process-isolated worker under its canonical UDID lock."""
+        worker_info = getattr(worker, "info", None) or {}
+        udid = str(getattr(worker, "udid", None) or worker_info.get("udid") or "")
+        if not udid or udid.startswith("pending:"):
+            raise RuntimeError("WiFi worker did not provide a verified device UDID")
+        worker_rsd = getattr(worker, "rsd", None)
+        if worker_rsd is not None:
+            raise RuntimeError("worker connection must not expose an in-process RSD")
+        worker_location = getattr(worker, "location_service", None)
+        if worker_location is None:
+            raise RuntimeError("WiFi worker did not expose a location proxy")
+        worker_ios = str(worker_info.get("ios_version") or "0.0")
+        worker_name = str(worker_info.get("name") or "iPhone")
+
+        identity = self._identity_key(udid)
+        connect_lock = self._connect_locks.setdefault(identity, asyncio.Lock())
+        async with connect_lock:
+            existing_key = self._connection_key(udid)
+            if existing_key is not None:
+                existing_conn = self._connections[existing_key]
+                if getattr(existing_conn, "worker", None) is worker:
+                    # Concurrent stale-IP attempts can converge on the exact
+                    # same verified worker. Reuse it; closing a duplicate
+                    # connection record would stop the worker already owned by
+                    # the first request.
+                    return DeviceInfo(
+                        udid=existing_conn.udid,
+                        name=existing_conn.name or worker_name,
+                        ios_version=existing_conn.ios_version or worker_ios,
+                        connection_type="Network",
+                        is_connected=True,
+                    )
+                await self.disconnect(existing_key, clear_location=False)
+
+            conn = _ActiveConnection(
+                udid=udid,
+                lockdown=None,
+                ios_version=worker_ios,
+                connection_type="Network",
+                name=worker_name,
+                location_service=worker_location,
+                external_location_service=True,
+                worker=worker,
+                owns_rsd=False,
+            )
+            async with self._lock:
+                publish_key = self._connection_key(udid)
+                if publish_key is None:
+                    self._connections[udid] = conn
+                    duplicate = None
+                else:
+                    duplicate = publish_key
+            if duplicate is not None:
+                existing = self._connection_for(duplicate)
+                if existing is not None and getattr(existing, "worker", None) is worker:
+                    return DeviceInfo(
+                        udid=existing.udid,
+                        name=existing.name or worker_name,
+                        ios_version=existing.ios_version or worker_ios,
+                        connection_type="Network",
+                        is_connected=True,
+                    )
+                await self._close_connection_resources(conn, udid)
+                existing = self._connection_for(duplicate)
+                return DeviceInfo(
+                    udid=existing.udid if existing is not None else duplicate,
+                    name=existing.name if existing is not None else worker_name,
+                    ios_version=existing.ios_version if existing is not None else worker_ios,
+                    connection_type="Network",
+                    is_connected=True,
+                )
+
+            logger.info("Adopted worker-backed WiFi connection for %s (iOS %s)", udid, worker_ios)
+            return DeviceInfo(
+                udid=udid,
+                name=worker_name,
+                ios_version=worker_ios,
+                connection_type="Network",
+                is_connected=True,
+            )
+
     async def connect_wifi_tunnel(
         self,
         rsd_address: str,
         rsd_port: int,
         *,
         existing_rsd: RemoteServiceDiscoveryService | None = None,
+        worker: object | None = None,
     ) -> DeviceInfo:
         """Connect to a device via an existing WiFi tunnel.
 
@@ -900,6 +1094,12 @@ class DeviceManager:
         Returns a ``DeviceInfo`` describing the connected device.
         """
         logger.info("Connecting via WiFi tunnel RSD at %s:%d", rsd_address, rsd_port)
+
+        # A macOS worker cannot share its RSD/dial plane with the backend
+        # process.  It has already validated the target UDID and opened DVT;
+        # adopt only its serialisable identity and location proxy.
+        if worker is not None:
+            return await self._adopt_wifi_worker(worker)
 
         rsd = existing_rsd
         owns_rsd = existing_rsd is None
@@ -958,7 +1158,7 @@ class DeviceManager:
         all_values = getattr(rsd, "all_values", None) or {}
         device_name = all_values.get("DeviceName") or ""
         if not device_name:
-            existing = self._connections.get(udid)
+            existing = self._connection_for(udid)
             if existing is not None and existing.name and existing.name != "iPhone":
                 device_name = existing.name
         if not device_name:
@@ -972,8 +1172,9 @@ class DeviceManager:
         # "user renamed the device since last USB plug" case.
         _remember_device_name(udid, device_name)
 
-        if udid in self._connections:
-            await self.disconnect(udid, clear_location=False)
+        existing_key = self._connection_key(udid)
+        if existing_key is not None:
+            await self.disconnect(existing_key, clear_location=False)
 
         conn = _ActiveConnection(
             udid=udid,
@@ -986,7 +1187,29 @@ class DeviceManager:
         )
 
         async with self._lock:
-            self._connections[udid] = conn
+            publish_key = self._connection_key(udid)
+            if publish_key is None:
+                self._connections[udid] = conn
+            else:
+                # Keep the first canonical record if two external callers
+                # adopt the same RSD concurrently. The new RSD has not been
+                # published, so it can be closed without touching the live
+                # connection.
+                duplicate = publish_key
+        if publish_key is not None:
+            if owns_rsd:
+                try:
+                    await rsd.close()
+                except Exception:
+                    logger.debug("Ignoring duplicate WiFi RSD close for %s", udid, exc_info=True)
+            existing = self._connection_for(duplicate)
+            return DeviceInfo(
+                udid=existing.udid if existing is not None else duplicate,
+                name=existing.name if existing is not None else device_name,
+                ios_version=existing.ios_version if existing is not None else ios_version_str,
+                connection_type="Network",
+                is_connected=True,
+            )
 
         logger.info("WiFi tunnel connected to %s (iOS %s)", udid, ios_version_str)
 
@@ -1072,11 +1295,11 @@ class DeviceManager:
 
     def is_connected(self, udid: str) -> bool:
         """Check whether a device is currently connected."""
-        return udid in self._connections
+        return self._connection_key(udid) is not None
 
     def get_connection_type(self, udid: str) -> str:
         """Return ``'USB'`` or ``'Network'`` for a connected device."""
-        conn = self._connections.get(udid)
+        conn = self._connection_for(udid)
         return conn.connection_type if conn else "USB"
 
     # ------------------------------------------------------------------
@@ -1108,7 +1331,8 @@ class DeviceManager:
 
         while True:
             async with self._lock:
-                conn = self._connections.get(udid)
+                connection_key = self._connection_key(udid)
+                conn = self._connections.get(connection_key) if connection_key is not None else None
 
             if conn is None:
                 remaining = deadline - time.monotonic()
@@ -1133,6 +1357,17 @@ class DeviceManager:
                 try:
                     from api.device import _tunnels  # local import: avoids cycle at module load
                     runner = _tunnels.get(udid)
+                    if runner is None:
+                        # The worker registry is normalized, while older
+                        # callers may still pass the original UDID casing.
+                        runner = next(
+                            (
+                                candidate
+                                for key, candidate in _tunnels.items()
+                                if str(key).lower() == str(udid).lower()
+                            ),
+                            None,
+                        )
                 except ImportError:
                     runner = None
                 if runner is not None and not runner.is_running():
@@ -1144,6 +1379,20 @@ class DeviceManager:
                         )
                     await asyncio.sleep(min(0.5, remaining))
                     continue
+
+                # A macOS WiFi worker keeps RSD, dial-plane, DVT, and the
+                # location instrument in its child process.  The parent
+                # connection intentionally has ``lockdown=None`` and only a
+                # LocationService proxy.  Never call DvtProvider(None):
+                # surface a typed tunnel failure so the API recovery layer
+                # invokes full_reconnect(), which rebuilds this worker.
+                if getattr(conn, "worker", None) is not None or getattr(
+                    conn, "external_location_service", False
+                ):
+                    raise DeviceLostError(
+                        f"WiFi worker owns the DVT channel for {udid}; restart the worker",
+                        reason=DeviceLostError.REASON_TUNNEL_DEAD,
+                    )
 
             # USB, or WiFi with a live tunnel: try opening a new DvtProvider.
             try:
@@ -1207,8 +1456,13 @@ class DeviceManager:
         Returns ``True`` when *udid* is healthily connected at exit.
         """
         async with self._lock:
-            conn = self._connections.get(udid)
+            connection_key = self._connection_key(udid)
+            conn = self._connections.get(connection_key) if connection_key is not None else None
         conn_type = conn.connection_type if conn else None
+        # Keep all subsequent teardown/reconnect operations on the stored
+        # canonical spelling. Callers may pass a casing-only alias from RSD,
+        # the UI, or a cached worker record.
+        target_udid = connection_key or udid
 
         if conn_type == "Network":
             logger.info("full_reconnect starting for %s over Network", udid)
@@ -1217,33 +1471,42 @@ class DeviceManager:
             except ImportError:
                 logger.debug("full_reconnect: api.device not importable")
                 return False
-            runner = _tunnels.get(udid)
+            runner = _tunnels.get(target_udid)
+            if runner is None:
+                runner = next(
+                    (
+                        candidate
+                        for key, candidate in _tunnels.items()
+                        if self._identity_key(key) == self._identity_key(target_udid)
+                    ),
+                    None,
+                )
             if runner is None or not runner.target_ip or not runner.target_port:
                 logger.debug(
-                    "full_reconnect: no live tunnel runner for %s; cannot recover", udid,
+                    "full_reconnect: no live tunnel runner for %s; cannot recover", target_udid,
                 )
                 return False
             try:
                 ok = await _attempt_tunnel_restart(
-                    udid, runner.target_ip, runner.target_port, None, runner,
+                    target_udid, runner.target_ip, runner.target_port, None, runner,
                 )
-                logger.info("full_reconnect finished for %s over Network (ok=%s)", udid, bool(ok))
+                logger.info("full_reconnect finished for %s over Network (ok=%s)", target_udid, bool(ok))
                 return bool(ok)
             except Exception:
-                logger.exception("full_reconnect: WiFi tunnel restart failed for %s", udid)
+                logger.exception("full_reconnect: WiFi tunnel restart failed for %s", target_udid)
                 return False
 
         # USB (or unknown type — try the bluntest recovery available).
         logger.info("full_reconnect starting for %s over USB", udid)
         try:
             try:
-                await self.disconnect(udid, clear_location=False)
+                await self.disconnect(target_udid, clear_location=False)
             except Exception:
-                logger.debug("full_reconnect: USB disconnect failed", exc_info=True)
-            await self.connect(udid)
+                logger.debug("full_reconnect: USB disconnect failed for %s", target_udid, exc_info=True)
+            await self.connect(target_udid)
             async with self._lock:
-                ok = udid in self._connections
-            logger.info("full_reconnect finished for %s over USB (ok=%s)", udid, ok)
+                ok = self._connection_key(target_udid) is not None
+            logger.info("full_reconnect finished for %s over USB (ok=%s)", target_udid, ok)
             return ok
         except Exception:
             logger.exception("full_reconnect: USB reconnect failed for %s", udid)

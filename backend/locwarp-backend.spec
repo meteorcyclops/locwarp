@@ -73,6 +73,11 @@ hidden = [
     'gpxpy',
     'httpx',
     'multipart',
+    # The frozen backend is also relaunched as ``--wifi-worker`` for each
+    # macOS WiFi device.  Keep the worker entrypoint explicit because the
+    # branch in main.py is normally excluded from the regular server path by
+    # PyInstaller's static import walk.
+    'core.wifi_worker',
 ]
 
 a = Analysis(

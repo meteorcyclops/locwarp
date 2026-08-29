@@ -2,10 +2,20 @@ import asyncio
 import json
 import logging
 import os
+import sys
 import time
 from contextlib import asynccontextmanager
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+
+# macOS WiFi tunnels run in one child process per iPhone.  The child uses the
+# same source entrypoint in development and the same frozen executable in a
+# packaged build, but must dispatch before importing/starting the FastAPI app
+# so it never starts a second backend listener or watchdog.
+if "--wifi-worker" in sys.argv:
+    from core.wifi_worker import worker_main
+
+    raise SystemExit(worker_main(sys.argv[1:]))
 
 import uvicorn
 from fastapi import FastAPI
@@ -902,6 +912,9 @@ async def _wifi_tunnel_keepalive():
 async def lifespan(application: FastAPI):
     import asyncio
     # ── Startup ──
+    from api.device import begin_wifi_tunnel_lifecycle
+
+    begin_wifi_tunnel_lifecycle()
     # The USB watchdog is the single owner of automatic connections. It
     # requires several consecutive presence samples before connecting, which
     # prevents an app launch during a USB/NCM re-enumeration from immediately
@@ -922,13 +935,23 @@ async def lifespan(application: FastAPI):
             pass
 
     app_state.save_settings()
+    # WiFi workers are child processes and may exist before their
+    # DeviceManager connection is adopted.  Detach/cancel their registry and
+    # watchdogs before the normal device cleanup so shutdown cannot respawn a
+    # tunnel or leave a standalone /wifi/tunnel/start worker orphaned.
+    try:
+        from api.device import shutdown_wifi_tunnels
+
+        await shutdown_wifi_tunnels()
+    except Exception:
+        logger.exception("WiFi tunnel shutdown cleanup failed")
     await app_state.device_manager.disconnect_all()
     logger.info("LocWarp shut down")
 
 
 # ── FastAPI app ───────────────────────────────────────────
 
-APP_VERSION = "0.2.193-kx.12"
+APP_VERSION = "0.2.193-kx.13"
 
 app = FastAPI(title="LocWarp", version=APP_VERSION, description="iOS Virtual Location Simulator", lifespan=lifespan)
 

@@ -728,6 +728,56 @@ function execFileText(file, args) {
   })
 }
 
+async function backendWorkerChildren(parentPid) {
+  if (process.platform !== 'darwin' || !Number.isInteger(parentPid) || parentPid <= 1) return []
+  try {
+    const raw = await execFileText('ps', ['-axo', 'pid=,ppid=,uid=,command='])
+    const ownUid = typeof process.getuid === 'function' ? process.getuid() : null
+    return String(raw).split(/\r?\n/).flatMap((line) => {
+      const match = line.match(/^\s*(\d+)\s+(\d+)\s+(\d+)\s+(.+)$/)
+      if (!match) return []
+      const pid = Number(match[1])
+      const ppid = Number(match[2])
+      const uid = Number(match[3])
+      const command = match[4]
+      return ppid === parentPid && pid > 1 && (ownUid === null || uid === ownUid) && command.includes('--wifi-worker')
+        ? [pid]
+        : []
+    })
+  } catch (error) {
+    console.warn('[electron] could not enumerate Wi-Fi workers:', error.message)
+    return []
+  }
+}
+
+async function isLocwarpWifiWorker(pid) {
+  if (process.platform !== 'darwin' || !Number.isInteger(pid) || pid <= 1) return false
+  try {
+    const [uidText, command] = await Promise.all([
+      execFileText('ps', ['-p', String(pid), '-o', 'uid=']),
+      execFileText('ps', ['-p', String(pid), '-o', 'command=']),
+    ])
+    const ownUid = typeof process.getuid === 'function' ? process.getuid() : null
+    return (ownUid === null || Number(uidText.trim()) === ownUid) && command.includes('--wifi-worker')
+  } catch {
+    return false
+  }
+}
+
+async function signalBackendWorkers(workerPids, signal) {
+  await Promise.all(workerPids.map(async (pid) => {
+    if (!await isLocwarpWifiWorker(pid)) return
+    try { process.kill(pid, signal) } catch {}
+  }))
+}
+
+async function stopBackendWorkers(workerPids) {
+  if (!workerPids.length) return
+  await signalBackendWorkers(workerPids, 'SIGTERM')
+  await new Promise((resolve) => setTimeout(resolve, 500))
+  await signalBackendWorkers(workerPids, 'SIGKILL')
+}
+
 async function listenerPid() {
   if (process.platform !== 'darwin') return null
   try {
@@ -742,6 +792,8 @@ async function listenerPid() {
 async function stopStaleMacBackend(exe) {
   const pid = await listenerPid()
   if (!pid) return
+
+  const workerPids = await backendWorkerChildren(pid)
 
   const [command, uidText] = await Promise.all([
     execFileText('ps', ['-p', String(pid), '-o', 'command=']),
@@ -774,6 +826,7 @@ async function stopStaleMacBackend(exe) {
   if (await isBackendReachable(200)) {
     throw new Error(`previous backend pid ${pid} did not release port ${BACKEND_PORT}`)
   }
+  await stopBackendWorkers(workerPids)
 }
 
 function resolveBackendExe() {
@@ -961,12 +1014,21 @@ async function stopBackend() {
   const child = backendProc
   if (!child) return
   backendStopPromise = (async () => {
+    // Snapshot direct Wi-Fi workers while the backend still owns them. A
+    // forced backend exit reparents those processes, after which PPID lookup
+    // can no longer find them. Commands are revalidated before every signal.
+    const workerPids = await backendWorkerChildren(child.pid)
     try { child.kill('SIGTERM') } catch {}
     const exited = await waitForChildExit(child, 5000)
     if (!exited) {
       console.warn('[electron] backend did not stop after SIGTERM; forcing shutdown')
+      await stopBackendWorkers(workerPids)
       try { child.kill('SIGKILL') } catch {}
       await waitForChildExit(child, 2000)
+    } else {
+      // Normal FastAPI shutdown should already stop workers. This is a
+      // validated safety net for a worker that ignored or missed shutdown.
+      await stopBackendWorkers(workerPids)
     }
     if (backendProc === child) backendProc = null
   })().finally(() => { backendStopPromise = null })

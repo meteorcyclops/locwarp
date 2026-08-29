@@ -139,7 +139,17 @@ export const wifiTunnelStartAndConnect = (ip: string, port = 49152, udid?: strin
     ...(udid ? { udid } : {}),
     ...(ports && ports.length ? { ports } : {}),
   })
-export interface TunnelInfo { udid: string; rsd_address?: string; rsd_port?: number; interface?: string; protocol?: string }
+export interface TunnelInfo {
+  udid: string
+  rsd_address?: string
+  rsd_port?: number
+  interface?: string
+  protocol?: string
+  // Newer backends advertise the platform's actual tunnel capacity. Keep it
+  // optional so older packaged backends remain compatible (the frontend
+  // falls back to the three-device group ceiling).
+  max_devices?: number
+}
 export interface ConnectionHealth {
   udid: string
   state: 'usb_absent' | 'stabilizing' | 'connecting' | 'connected' | 'reconnect_backoff' | 'usb_flapping'
@@ -167,10 +177,18 @@ export interface ConnectionHealth {
 export const getConnectionDiagnostics = () =>
   request<{ devices: ConnectionHealth[]; usb_flapping: boolean }>('GET', '/api/diagnostics/connection')
 export const wifiTunnelStatus = () =>
-  request<{ tunnels: TunnelInfo[]; running: boolean; rsd_address?: string; rsd_port?: number }>(
+  request<{
+    tunnels: TunnelInfo[]
+    running: boolean
+    rsd_address?: string
+    rsd_port?: number
+    max_devices?: number
+  }>(
     'GET', '/api/device/wifi/tunnel/status',
   )
-export const wifiTunnelDiscover = () => request<{ devices: { ip: string; port: number; ports?: number[]; host: string; name: string }[] }>('GET', '/api/device/wifi/tunnel/discover')
+export const wifiTunnelDiscover = () => request<{
+  devices: { ip: string; port: number; ports?: number[]; host: string; name: string; udid?: string }[]
+}>('GET', '/api/device/wifi/tunnel/discover')
 export const wifiTunnelFindPort = (ip: string) =>
   request<{ ip: string; ports: number[] }>('POST', '/api/device/wifi/tunnel/find_port', { ip })
 // udid: stop one specific tunnel; omit to stop all (legacy stop-all)
@@ -205,6 +223,21 @@ export const teleport = (lat: number, lng: number, udid?: string, requireIdle = 
     lng,
     ...ud(udid),
     ...(requireIdle ? { require_idle: true } : {}),
+  })
+export interface BatchTeleportResult {
+  status: 'ok' | 'partial_failed'
+  ok: string[]
+  failed: Array<{ udid: string; reason: string; status_code?: number }>
+  total: number
+  lat: number
+  lng: number
+}
+export const teleportBatch = (lat: number, lng: number, udids: string[], requireIdle = true) =>
+  request<BatchTeleportResult>('POST', '/api/location/teleport/batch', {
+    lat,
+    lng,
+    udids,
+    require_idle: requireIdle,
   })
 export const goldDittoCycle = (lat: number, lng: number, hold_ms = 500, udid?: string) =>
   request<any>('POST', '/api/location/goldditto/cycle', { lat, lng, hold_ms, ...ud(udid) })
