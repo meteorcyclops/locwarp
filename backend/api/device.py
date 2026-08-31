@@ -627,6 +627,10 @@ class WifiTunnelStartRequest(BaseModel):
     ip: str
     port: int = 49152
     udid: str | None = None
+    # Discovery already scanned this IP and supplied its open ports.  When
+    # false, an identity/pair failure should return immediately so the client
+    # can try the next discovered phone instead of re-scanning the wrong one.
+    rescan: bool = True
     # Extra RemotePairing port candidates, in fallback order. iOS re-picks
     # its RemotePairing port on every boot / network rebind, so a single
     # remembered port goes stale constantly; /discover and /find_port now
@@ -644,6 +648,8 @@ NON_REMOTEPAIRING_PORTS = frozenset({62078})
 # ports. Wrong ports normally fail in milliseconds (RST), so this only
 # bites when several candidates are silently dropped by the network.
 TUNNEL_START_BUDGET = 45.0
+WIFI_DISCOVERY_BUDGET = 20.0
+_wifi_discovery_task: asyncio.Task[dict] | None = None
 
 
 def _filter_remotepairing_ports(ports: list[int]) -> list[int]:
@@ -666,18 +672,25 @@ def _get_primary_local_ip() -> str | None:
 
 
 async def _tcp_probe(ip: str, port: int, timeout: float = 0.4) -> bool:
+    # Own the socket explicitly. ``asyncio.open_connection`` can leave its
+    # internally-created socket in SYN_SENT after the surrounding request is
+    # cancelled; enough of those leaked probes make the single backend event
+    # loop appear frozen during DHCP/Bonjour recovery.  An explicit finally
+    # closes every probe on success, timeout and cancellation.
+    import socket as _s
+
+    sock = _s.socket(_s.AF_INET, _s.SOCK_STREAM)
+    sock.setblocking(False)
     try:
-        reader, writer = await asyncio.wait_for(
-            asyncio.open_connection(ip, port), timeout=timeout,
+        await asyncio.wait_for(
+            asyncio.get_running_loop().sock_connect(sock, (ip, port)),
+            timeout=timeout,
         )
-        writer.close()
-        try:
-            await writer.wait_closed()
-        except (OSError, ConnectionError):
-            pass
         return True
     except (OSError, ConnectionError, asyncio.TimeoutError):
         return False
+    finally:
+        sock.close()
 
 
 async def _scan_subnet_for_port(port: int = 49152) -> list[str]:
@@ -706,6 +719,7 @@ async def _scan_ports_for_ip(
     end: int = 65535,
     concurrency: int = 1024,
     timeout: float = 0.35,
+    stop_after_hits: int | None = None,
 ) -> list[int]:
     """Scan the IANA dynamic / ephemeral range on a single IP for open TCP ports.
 
@@ -731,7 +745,15 @@ async def _scan_ports_for_ip(
             for port, result in zip(ports, results)
             if result is True
         )
+        # Discovery only needs a small first batch of open ports so the
+        # identity-verified RemotePairing handshake can decide which iPhone
+        # owns the address.  The manual/full recovery path leaves this unset
+        # and still returns every listener in the range.
+        if stop_after_hits is not None and hits:
+            break
     hits.sort()
+    if stop_after_hits is not None:
+        return hits[:max(1, stop_after_hits)]
     return hits
 
 
@@ -755,8 +777,7 @@ async def wifi_tunnel_find_port(req: WifiTunnelFindPortRequest):
     return {"ip": ip, "ports": ports}
 
 
-@router.get("/wifi/tunnel/discover")
-async def wifi_tunnel_discover():
+async def _wifi_tunnel_discover_impl() -> dict:
     """Find iPhones on the local network. First tries mDNS (Bonjour RemotePairing
     broadcast); if that yields nothing, falls back to a /24 subnet TCP scan on the
     standard RemotePairing port (49152)."""
@@ -800,9 +821,17 @@ async def wifi_tunnel_discover():
     #      (49152 legacy port + 62078 lockdown) to find live candidates
     #   b) full-range scan (49152-65535) on each candidate to find the
     #      port iOS actually picked this boot
-    if not results:
+    # Bonjour can expose only the currently awake phone.  Treating any mDNS
+    # hit as a complete result made a sleeping/quiet second iPhone impossible
+    # to rediscover after DHCP changed its address.  Augment partial results
+    # until the product capacity is represented; the final de-dupe removes
+    # the already-advertised phone.
+    discovered_ips = {str(item.get("ip") or "") for item in results}
+    if len(discovered_ips) < MAX_DEVICES:
         _tunnel_logger.info(
-            "mDNS empty; falling back to smart /24 scan (probe + full-range)",
+            "mDNS found %d/%d address(es); augmenting with smart /24 scan",
+            len(discovered_ips),
+            MAX_DEVICES,
         )
         try:
             my_ip = _get_primary_local_ip()
@@ -836,7 +865,7 @@ async def wifi_tunnel_discover():
                         # so discovery never multiplies socket pressure by the
                         # number of unrelated candidate devices.
                         async with scan_slots:
-                            ports = await _scan_ports_for_ip(ip)
+                            ports = await _scan_ports_for_ip(ip, stop_after_hits=8)
                     except Exception as e:
                         _tunnel_logger.warning("port scan for %s failed: %s", ip, e)
                         return ip, []
@@ -877,6 +906,32 @@ async def wifi_tunnel_discover():
         unique.append(r)
 
     return {"devices": unique}
+
+
+@router.get("/wifi/tunnel/discover")
+async def wifi_tunnel_discover():
+    """Return one shared, bounded discovery pass.
+
+    Renderer aborts do not reliably cancel an ASGI handler.  Without a
+    server-side budget, repeated 15-second reconnect retries could stack
+    multiple subnet scans and starve health/device requests.  Concurrent
+    callers now share one pass, and the pass is cancelled after the product's
+    ten-second discovery budget.
+    """
+    global _wifi_discovery_task
+    if _wifi_discovery_task is None or _wifi_discovery_task.done():
+        _wifi_discovery_task = asyncio.create_task(
+            asyncio.wait_for(_wifi_tunnel_discover_impl(), timeout=WIFI_DISCOVERY_BUDGET),
+        )
+    task = _wifi_discovery_task
+    try:
+        return await asyncio.shield(task)
+    except asyncio.TimeoutError:
+        _tunnel_logger.warning(
+            "WiFi discovery exceeded %.1fs budget; returning no candidates",
+            WIFI_DISCOVERY_BUDGET,
+        )
+        return {"devices": []}
 
 
 async def _cleanup_wifi_connection_for(udid: str, *, caller: str) -> bool:
@@ -1499,6 +1554,25 @@ def _build_tunnel_port_candidates(req: WifiTunnelStartRequest) -> list[int]:
     return ports
 
 
+def _is_host_unreachable_error(error: BaseException) -> bool:
+    """True only for transport failures proving the saved IP is gone.
+
+    Pairing/authentication failures must continue through the normal port and
+    repair logic.  These messages come from the child worker's underlying
+    socket and mean that a full 16k-port scan of the same address cannot
+    possibly help.
+    """
+    text = str(error).lower()
+    return any(fragment in text for fragment in (
+        "host is down",
+        "no route to host",
+        "network is unreachable",
+        "errno 64",
+        "errno 65",
+        "errno 51",
+    ))
+
+
 @router.post("/wifi/tunnel/start")
 async def wifi_tunnel_start(req: WifiTunnelStartRequest):
     """Start one WiFi tunnel under its per-target transaction lock."""
@@ -1692,6 +1766,14 @@ async def _wifi_tunnel_start_impl(
                         if owner is not None:
                             owner.clear()
                         last_error = e
+                        if _is_host_unreachable_error(e):
+                            _tunnel_logger.info(
+                                "Saved WiFi endpoint %s is unreachable; skipping full port scan",
+                                req.ip,
+                            )
+                            port_candidates.clear()
+                            rescanned = True
+                            break
                         _tunnel_logger.info(
                             "WiFi tunnel candidate %s on port %d failed (%s); "
                             "trying next",
@@ -1805,6 +1887,14 @@ async def _wifi_tunnel_start_impl(
                     }
 
             if rescanned:
+                break
+
+            if not req.rescan:
+                _tunnel_logger.info(
+                    "Discovery-supplied ports exhausted for %s; trying next endpoint without full re-scan",
+                    req.ip,
+                )
+                rescanned = True
                 break
 
             # Every port the caller knew about is exhausted. Before giving
@@ -2152,6 +2242,24 @@ async def _wifi_tunnel_start_and_connect_impl(
         except Exception:
             _tunnel_logger.exception(
                 "Failed to broadcast WiFi device_connected for %s",
+                info.udid,
+            )
+
+        # A device that rejoins through the explicit WiFi button must receive
+        # the same group behaviour as one recovered by the tunnel/USB
+        # watchdogs.  Previously this path rebuilt a healthy engine but left
+        # it idle, so the UI could show 2/2 connected while only the surviving
+        # phone continued the route.  Keep the existing primary in charge and
+        # attach this freshly-created engine as its position follower.
+        try:
+            from main import _auto_sync_new_device_to_primary
+
+            await _auto_sync_new_device_to_primary(info.udid)
+        except Exception:
+            # Connection success must remain usable even when the current
+            # primary has no position yet or a transient location push fails.
+            _tunnel_logger.exception(
+                "Auto-sync after explicit WiFi connect failed for %s",
                 info.udid,
             )
 

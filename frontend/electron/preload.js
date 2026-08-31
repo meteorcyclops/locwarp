@@ -8,6 +8,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   relaunchApp: () => ipcRenderer.invoke('relaunch-app'),
   restartBackend: () => ipcRenderer.invoke('restart-backend'),
   getDesktopApiConfig: () => ipcRenderer.sendSync('get-desktop-api-config'),
+  getNetworkContext: () => ipcRenderer.invoke('get-network-context'),
+  onNetworkContextChanged: (callback) => {
+    const listener = (_event, payload) => callback(payload)
+    ipcRenderer.on('network-context-changed', listener)
+    return () => ipcRenderer.removeListener('network-context-changed', listener)
+  },
   gpsWatch: {
     selectRegion: () => ipcRenderer.invoke('gps-watch:select-region'),
     start: (region) => ipcRenderer.invoke('gps-watch:start', region),

@@ -3,6 +3,16 @@ import { createPortal } from 'react-dom';
 import { wifiTunnelDiscover, wifiTunnelFindPort, wifiRepair, wifiKeepaliveGet, wifiKeepaliveSet, mountPersonalizedDdi, type TunnelInfo, type ConnectionHealth } from '../services/api';
 import { useT } from '../i18n';
 import { reconcileConnectionHealth } from '../utils/connectionHealth';
+import type { GroupSyncStatus } from '../hooks/useSimulation';
+import { canonicalUdid, type WifiReconnectStatus } from '../utils/wifiReconnect';
+import {
+  collapseLinkLocalDiscovery,
+  countGpsReady,
+  getDeviceStage,
+  resolveDiscoveryIdentity,
+  type DeviceStage,
+  type DiscoveryEndpoint,
+} from '../utils/deviceStatus';
 
 // The backend advertises the actual platform capability. Until that response
 // arrives, preserve the old macOS one-tunnel fallback so an old packaged
@@ -15,6 +25,7 @@ interface Device {
   id: string;
   name: string;
   iosVersion: string;
+  model?: string;
   connectionType?: string;
   isConnected?: boolean;
   developerModeEnabled?: boolean | null;
@@ -41,16 +52,59 @@ interface DeviceStatusProps {
   onTogglePin?: (udid: string) => void;
   connectionHealth?: ConnectionHealth[];
   maxTunnelDevices?: number;
+  groupSyncStatus?: GroupSyncStatus | null;
+  groupMaxAckDeltaMs?: number;
+  wifiReconnects?: Record<string, WifiReconnectStatus>;
 }
 
-const ConnectionHealthCard: React.FC<{ health: ConnectionHealth }> = ({ health }) => {
+const formatHealthClock = (unix?: number) => unix != null
+  ? new Date(unix * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })
+  : '';
+
+const lastLocationSuccessAgeSeconds = (health: ConnectionHealth, now: number): number | null => {
+  if (health.last_location_success_unix != null) {
+    return Math.max(0, Math.floor(now / 1000 - health.last_location_success_unix));
+  }
+  if (health.last_location_success_age_seconds != null) {
+    return Math.max(0, Math.floor(health.last_location_success_age_seconds));
+  }
+  return null;
+};
+
+const LocationHealthMeta: React.FC<{
+  health?: ConnectionHealth;
+  now: number;
+  showEmpty?: boolean;
+}> = ({ health, now, showEmpty = false }) => {
+  const t = useT();
+  if (!health) {
+    return showEmpty ? (
+      <div className="device-location-meta" style={{ fontSize: 9, opacity: 0.52, marginTop: 2 }}>
+        {t('connection.location_last_success_none')}
+      </div>
+    ) : null;
+  }
+  const age = lastLocationSuccessAgeSeconds(health, now);
+  const parts = age != null
+    ? [t('connection.location_last_success_seconds', { n: age })]
+    : [t('connection.location_last_success_none')];
+  if (health.last_location_recovery_unix != null) {
+    parts.push(t('connection.location_recovered', { time: formatHealthClock(health.last_location_recovery_unix) }));
+  }
+  return (
+    <div className="device-location-meta" style={{ fontSize: 9, opacity: 0.64, marginTop: 2, lineHeight: 1.35 }}>
+      {parts.join(' · ')}
+    </div>
+  );
+};
+
+const ConnectionHealthCard: React.FC<{ health: ConnectionHealth; isWifi?: boolean }> = ({ health, isWifi = false }) => {
   const t = useT();
   const [now, setNow] = useState(() => Date.now());
   React.useEffect(() => {
-    if (health.state !== 'reconnect_backoff' && !health.connected_since_unix) return;
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(timer);
-  }, [health.state, health.retry_at_unix, health.connected_since_unix]);
+  }, []);
 
   const retrySeconds = health.retry_at_unix
     ? Math.max(0, Math.ceil(health.retry_at_unix - now / 1000))
@@ -75,10 +129,14 @@ const ConnectionHealthCard: React.FC<{ health: ConnectionHealth }> = ({ health }
   const formatClock = (unix?: number) => unix
     ? new Date(unix * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })
     : '';
+  const stableLabel = connectedButUnstable
+    ? (isWifi ? t('connection.health_wifi_connected_unstable') : t('connection.health_connected_unstable'))
+    : (isWifi ? t('connection.health_wifi_connected') : t('connection.health_connected'));
+  const stableDetail = isWifi
+    ? t('connection.health_wifi_connected_detail')
+    : t('connection.health_connected_detail');
   const labels: Record<ConnectionHealth['state'], string> = {
-    connected: connectedButUnstable
-      ? t('connection.health_connected_unstable')
-      : t('connection.health_connected'),
+    connected: stableLabel,
     stabilizing: t('connection.health_stabilizing', {
       current: health.stable_samples ?? 0,
       required: health.required_samples ?? 3,
@@ -107,20 +165,19 @@ const ConnectionHealthCard: React.FC<{ health: ConnectionHealth }> = ({ health }
       }));
       details.push(t('connection.location_rebuilding'));
     } else if (locationActive) {
-      details.push(t('connection.location_last_success', {
-        value: formatDuration(health.last_location_success_unix
-          ? now / 1000 - health.last_location_success_unix
-          : health.last_location_success_age_seconds ?? 0),
-      }));
+      details.push(stableDetail);
+      // Exact last-success age and recovery time are rendered in the compact
+      // metadata row below, shared by the active card and group roster.
     } else if (!connectedButUnstable) {
-      details.push(t('connection.health_connected_detail'));
+      // A transport connection alone does not prove that DVT accepted a GPS
+      // write. Keep this card consistent with the per-device group roster.
+      details.push(t('connection.location_pending_detail'));
     }
     if (connectedButUnstable && health.last_reconnect_unix) {
       details.push(t('connection.health_last_reconnect', { time: formatClock(health.last_reconnect_unix) }));
     }
-    if (!locationRecovering && health.last_location_recovery_unix) {
-      details.push(t('connection.location_recovered', { time: formatClock(health.last_location_recovery_unix) }));
-    }
+    // Keep recovery time in LocationHealthMeta so all device cards use the
+    // same presentation.
   }
   if (health.state === 'stabilizing') {
     const current = health.stable_samples ?? 0;
@@ -157,6 +214,7 @@ const ConnectionHealthCard: React.FC<{ health: ConnectionHealth }> = ({ health }
             <span style={{ width: `${Math.min(100, ((health.stable_samples ?? 0) / Math.max(1, health.required_samples ?? 3)) * 100)}%` }} />
           </span>
         )}
+        <LocationHealthMeta health={health} now={now} />
       </span>
     </div>
   );
@@ -177,9 +235,17 @@ const DeviceStatus: React.FC<DeviceStatusProps> = ({
   onTogglePin,
   connectionHealth = [],
   maxTunnelDevices = DEFAULT_MAX_TUNNEL_DEVICES,
+  groupSyncStatus = null,
+  groupMaxAckDeltaMs = 0,
+  wifiReconnects = {},
 }) => {
   const t = useT();
   const [showDropdown, setShowDropdown] = useState(false);
+  const [now, setNow] = useState(() => Date.now());
+  React.useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
   const [tunnelIp, setTunnelIp] = useState(() => localStorage.getItem('locwarp.tunnel.ip') || '');
   const [tunnelPort, setTunnelPort] = useState(() => localStorage.getItem('locwarp.tunnel.port') || '');
   const [portScanning, setPortScanning] = useState(false);
@@ -200,7 +266,7 @@ const DeviceStatus: React.FC<DeviceStatusProps> = ({
   // instead of retyping the IP after every WiFi drop / manual Stop
   // (issue #29). Refresh whenever the dropdown is toggled or after a
   // successful connect so the list reflects useDevice's latest write.
-  const readSavedIps = (): Array<{ ip: string; port: number; udid?: string; lastUsed: number }> => {
+  const readSavedIps = (): Array<{ ip: string; port: number; udid?: string; name?: string; model?: string; lastUsed: number }> => {
     try {
       const raw = localStorage.getItem('locwarp.tunnel.savedips') || '[]';
       const parsed = JSON.parse(raw);
@@ -223,7 +289,8 @@ const DeviceStatus: React.FC<DeviceStatusProps> = ({
   // (issue #33). The name is written into savedips on every successful
   // connect by useDevice.startWifiTunnel.
   const savedNameByUdid: Record<string, string> = {};
-  savedIps.forEach((e: any) => { if (e && e.udid && e.name) savedNameByUdid[e.udid] = e.name; });
+  savedIps.forEach((e: any) => { if (e && e.udid && e.name) savedNameByUdid[canonicalUdid(e.udid)] = e.name; });
+  const isPinnedUdid = (udid: string) => pinnedUdids.some((saved) => canonicalUdid(saved) === canonicalUdid(udid));
   // Auto-attempt the saved IP/port on app launch. Default ON so users who
   // previously connected over WiFi don't have to re-click on every cold
   // start — App.tsx reads this flag once after the WS handshake settles.
@@ -265,37 +332,49 @@ const DeviceStatus: React.FC<DeviceStatusProps> = ({
   // GPS update. This compact roster surfaces paired/connected/tunnel/GPS
   // state for every known device without changing any backend semantics.
   const groupDevices = devices.slice(0, 3);
-  const tunnelByUdid = new Map(tunnels.map((tn) => [tn.udid, tn]));
-  const healthByUdid = new Map(connectionHealth.map((health) => [health.udid.toLowerCase(), health]));
-  const isDeviceConnected = (item: Device) => item.isConnected === true
-    || item.id === device?.id && isConnected
-    || tunnelByUdid.has(item.id);
-  const isDeviceReady = (item: Device) => {
-    if (!isDeviceConnected(item)) return false;
-    const health = healthByUdid.get(item.id.toLowerCase());
-    // Do not infer GPS readiness from a TCP tunnel alone. The backend must
-    // report a healthy location channel after the first accepted write;
-    // otherwise show the member as connected/tunnel-ready but unverified.
-    return health?.location_channel_state === 'healthy';
+  const tunnelByUdid = new Map(tunnels.map((tn) => [canonicalUdid(tn.udid), tn]));
+  const healthByUdid = new Map(connectionHealth.map((health) => [canonicalUdid(health.udid), health]));
+  const healthFor = (item: Device) => healthByUdid.get(canonicalUdid(item.id));
+  const tunnelFor = (item: Device) => tunnelByUdid.get(canonicalUdid(item.id));
+  const isDeviceConnected = (item: Device) => {
+    const health = healthFor(item);
+    return item.isConnected === true
+      || canonicalUdid(item.id) === canonicalUdid(device?.id) && isConnected
+      || tunnelByUdid.has(canonicalUdid(item.id))
+      || health?.is_connected === true
+      || health?.location_channel_state === 'healthy'
+      || health?.location_channel_state === 'recovering';
   };
-  const connectionStage = (item: Device) => {
-    if (!isDeviceConnected(item)) return 'paired';
-    const health = healthByUdid.get(item.id.toLowerCase());
-    if (item.connectionType === 'Network' && !tunnelByUdid.has(item.id)) return 'exploring';
-    if (health?.location_channel_state === 'healthy') return 'gps';
-    if (health?.location_channel_state === 'recovering' || health?.location_channel_state === 'unavailable') return 'gps_waiting';
-    if (item.connectionType === 'Network') return 'tunnel';
-    return 'connected';
-  };
-  const stageLabel = (stage: string) => ({
+  const connectionStage = (item: Device): DeviceStage => getDeviceStage({
+    isConnected: isDeviceConnected(item),
+    connectionType: item.connectionType,
+    hasTunnel: tunnelByUdid.has(canonicalUdid(item.id)),
+    health: healthFor(item),
+  });
+  const isDeviceReady = (item: Device) => connectionStage(item) === 'gps';
+  const stageLabel = (stage: DeviceStage) => ({
     paired: t('group.device_paired'),
     exploring: t('group.device_exploring'),
     tunnel: t('group.device_tunnel'),
     gps: t('group.device_gps_ready'),
     gps_waiting: t('group.device_gps_waiting'),
+    recovering: t('group.device_recovering'),
+    offline: t('group.device_offline'),
+    // Kept for forward compatibility with older snapshots that may still
+    // pass a generic connected stage into this presentation map.
     connected: t('group.device_connected'),
   }[stage] || stage);
-  const readyCount = groupDevices.filter(isDeviceReady).length;
+  const reconnectLabel = (status?: WifiReconnectStatus) => {
+    if (!status || status.stage === 'idle' || status.stage === 'connected') return null;
+    if (status.stage === 'last_ip') return t('wifi.reconnect_last_ip');
+    if (status.stage === 'network_changed_discovery') return t('wifi.reconnect_network_changed');
+    if (status.stage === 'found_name') return t('wifi.reconnect_found', { name: status.name || status.udid.slice(-8) });
+    if (status.stage === 'tunnel') return t('wifi.reconnect_tunnel');
+    if (status.stage === 'needs_usb_repair') return t('wifi.reconnect_needs_usb');
+    if (status.stage === 'failed') return t('wifi.reconnect_retrying');
+    return null;
+  };
+  const readyCount = countGpsReady(groupDevices, connectionStage);
 
   const handleRepair = async () => {
     setRepairState('running');
@@ -349,30 +428,25 @@ const DeviceStatus: React.FC<DeviceStatusProps> = ({
 
   // Multi-result detect: keep the full list and let the user pick one when
   // mDNS / subnet scan returns 2+ iPhones. Single result auto-fills as before.
-  const [discoverResults, setDiscoverResults] = useState<Array<{ ip: string; port: number; name: string }>>([]);
+  const [discoverResults, setDiscoverResults] = useState<DiscoveryEndpoint[]>([]);
   const handleDiscover = async () => {
     setDiscovering(true);
     setTunnelError(null);
     setDiscoverResults([]);
     try {
       const res = await wifiTunnelDiscover();
-      const rawList = res?.devices || [];
-      // Deduplicate by ip:port — mDNS can return the same device on
-      // multiple interfaces (e.g. Ethernet + WiFi) with identical IPs.
-      const seen = new Set<string>();
-      const list = rawList.filter((d: any) => {
-        const key = `${d.ip}:${d.port}`;
-        if (seen.has(key)) return false;
-        seen.add(key);
-        return true;
-      });
+      const rawList = (res?.devices || []) as DiscoveryEndpoint[];
+      // Bonjour reports both the normal LAN endpoint and a USB/NCM
+      // 169.254.x.x endpoint for one phone. Keep the normal endpoint in the
+      // picker so users do not accidentally select the transport detail.
+      const list = collapseLinkLocalDiscovery(rawList);
       if (list.length === 0) {
         setTunnelError(t('wifi.device_not_detected'));
       } else if (list.length === 1) {
         setTunnelIp(list[0].ip);
         setTunnelPort(String(list[0].port));
       } else {
-        setDiscoverResults(list.map((d: any) => ({ ip: d.ip, port: d.port, name: d.name || d.ip })));
+        setDiscoverResults(list);
       }
     } catch (err: any) {
       setTunnelError(err.message || t('wifi.detect_failed'));
@@ -380,15 +454,18 @@ const DeviceStatus: React.FC<DeviceStatusProps> = ({
       setDiscovering(false);
     }
   };
-  const pickDiscoverResult = (r: { ip: string; port: number }) => {
+  const pickDiscoverResult = (r: DiscoveryEndpoint) => {
     setTunnelIp(r.ip);
     setTunnelPort(String(r.port));
     setDiscoverResults([]);
   };
+  const discoveryDetails = (r: DiscoveryEndpoint) => {
+    return resolveDiscoveryIdentity(r, savedIps, devices);
+  };
 
   return (
     <div className={`device-status ${isConnected ? 'device-connected' : 'device-disconnected'}`}>
-      {displayedHealth && <ConnectionHealthCard health={displayedHealth} />}
+      {displayedHealth && <ConnectionHealthCard health={displayedHealth} isWifi={device?.connectionType === 'Network'} />}
       {groupDevices.length > 1 && (
         <div
           className="connection-group-summary"
@@ -403,16 +480,58 @@ const DeviceStatus: React.FC<DeviceStatusProps> = ({
             <strong style={{ fontSize: 11 }}>{t('group.connection_summary', { ready: readyCount, total: groupDevices.length })}</strong>
             <span style={{ fontSize: 10, opacity: 0.6 }}>{tunnelLimit} max</span>
           </div>
-          <div style={{ display: 'grid', gap: 3 }}>
+          {groupSyncStatus && ['paused', 'recovering', 'recovery_failed'].includes(groupSyncStatus.status) && (
+            <div className="group-sync-recovery" style={{ marginBottom: 5, fontSize: 10, color: '#ffb627' }}>
+              {t('group.reconnecting', {
+                ready: groupSyncStatus.ready_count ?? 0,
+                total: groupSyncStatus.expected_count ?? groupSyncStatus.total ?? groupDevices.length,
+                attempt: groupSyncStatus.attempt ?? 1,
+                max: groupSyncStatus.max_attempts ?? 3,
+              })}
+            </div>
+          )}
+          {groupMaxAckDeltaMs > 0 && (
+            <div className="group-sync-skew" style={{ marginBottom: 5, fontSize: 9, opacity: 0.64 }}>
+              {t('group.max_sync_delta', { ms: Math.round(groupMaxAckDeltaMs) })}
+            </div>
+          )}
+            <div style={{ display: 'grid', gap: 3 }}>
             {groupDevices.map((item, index) => {
               const stage = connectionStage(item);
-              const ready = stage === 'gps';
+              const ready = isDeviceReady(item);
+              const health = healthFor(item);
+              const reconnect = wifiReconnects[canonicalUdid(item.id)];
+              const reconnectText = reconnectLabel(reconnect);
+              const stageColor = stage === 'gps'
+                ? '#4ecdc4'
+                : stage === 'offline'
+                  ? '#ef7777'
+                  : isDeviceConnected(item)
+                    ? '#ffb627'
+                    : '#858b9a';
               return (
-                <div key={item.id} style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0, fontSize: 10 }}>
-                  <span style={{ width: 6, height: 6, borderRadius: '50%', flexShrink: 0, background: ready ? '#4ecdc4' : isDeviceConnected(item) ? '#ffb627' : '#858b9a' }} />
-                  <span style={{ color: ['#4285f4', '#ff9800', '#9c6ade'][index] || '#9aa4bd', fontWeight: 700, flexShrink: 0 }}>{String.fromCharCode(65 + index)}</span>
-                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>{item.name || item.id.slice(0, 10)}</span>
-                  <span style={{ opacity: 0.72, whiteSpace: 'nowrap' }}>{stageLabel(stage)}</span>
+                <div key={item.id} className={`device-group-member device-stage-${stage}`} style={{ minWidth: 0, fontSize: 10 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+                    <span style={{ width: 6, height: 6, borderRadius: '50%', flexShrink: 0, background: stageColor }} />
+                    <span style={{ color: ['#4285f4', '#ff9800', '#9c6ade'][index] || '#9aa4bd', fontWeight: 700, flexShrink: 0 }}>{String.fromCharCode(65 + index)}</span>
+                    <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>{item.name || item.id.slice(0, 10)}</span>
+                    <span style={{ opacity: ready ? 0.95 : 0.72, whiteSpace: 'nowrap', color: ready ? '#4ecdc4' : undefined }}>{stageLabel(stage)}</span>
+                  </div>
+                  {reconnectText && (
+                    <div
+                      className={`device-reconnect-stage reconnect-${reconnect?.stage}`}
+                      style={{
+                        marginLeft: 30,
+                        marginTop: 2,
+                        fontSize: 9,
+                        lineHeight: 1.35,
+                        color: reconnect?.stage === 'needs_usb_repair' ? '#ef7777' : '#ffb627',
+                      }}
+                    >
+                      {reconnectText}{(reconnect?.attempt ?? 0) > 1 ? ` · ${t('wifi.reconnect_attempt', { n: reconnect?.attempt ?? 1 })}` : ''}
+                    </div>
+                  )}
+                  <LocationHealthMeta health={health} now={now} showEmpty={stage !== 'paired'} />
                 </div>
               );
             })}
@@ -433,8 +552,8 @@ const DeviceStatus: React.FC<DeviceStatusProps> = ({
             const isWifi = device.connectionType === 'Network';
             const iosMajor = Number.parseInt(String(device.iosVersion || '0').split('.')[0] || '0', 10);
             const showDdiRepair = !isWifi && Number.isFinite(iosMajor) && iosMajor >= 17;
-            const activeTunnel = isWifi ? tunnels.find((tn) => tn.udid === device.id) : null;
-            const pinned = activeTunnel ? pinnedUdids.includes(device.id) : false;
+            const activeTunnel = isWifi ? tunnelFor(device) : null;
+            const pinned = activeTunnel ? isPinnedUdid(device.id) : false;
             return (
               <>
                 <div style={{ fontSize: 13, fontWeight: 600, overflowWrap: 'anywhere', lineHeight: 1.35 }}>
@@ -558,12 +677,12 @@ const DeviceStatus: React.FC<DeviceStatusProps> = ({
       </button>
 
       {/* WiFi tunnel cards for additional devices not shown in the top row */}
-      {tunnels.filter((tn) => tn.udid !== device?.id).length > 0 && (
+      {tunnels.filter((tn) => canonicalUdid(tn.udid) !== canonicalUdid(device?.id)).length > 0 && (
         <div style={{ marginBottom: 8 }}>
-          {tunnels.filter((tn) => tn.udid !== device?.id).map((tn) => {
-            const dev = devices.find((d) => d.id === tn.udid);
-            const dispName = dev?.name || savedNameByUdid[tn.udid] || tn.udid.slice(0, 12);
-            const pinned = pinnedUdids.includes(tn.udid);
+          {tunnels.filter((tn) => canonicalUdid(tn.udid) !== canonicalUdid(device?.id)).map((tn) => {
+            const dev = devices.find((d) => canonicalUdid(d.id) === canonicalUdid(tn.udid));
+            const dispName = dev?.name || savedNameByUdid[canonicalUdid(tn.udid)] || tn.udid.slice(0, 12);
+            const pinned = isPinnedUdid(tn.udid);
             return (
               <div key={tn.udid} style={{
                 display: 'flex', alignItems: 'flex-start', gap: 6,
@@ -862,13 +981,24 @@ const DeviceStatus: React.FC<DeviceStatusProps> = ({
                   </div>
                   {discoverResults.map((r) => (
                     <div key={`${r.ip}:${r.port}`} style={{
-                      display: 'flex', alignItems: 'center', gap: 6,
+                      display: 'flex', alignItems: 'center', gap: 8,
                       padding: '4px 0', borderTop: '1px solid rgba(255,255,255,0.06)',
                     }}>
-                      <div style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                        <span style={{ opacity: 0.85 }}>{r.ip}</span>
-                        <span style={{ opacity: 0.55, marginLeft: 6 }}>{r.name}</span>
-                      </div>
+                      {(() => {
+                        const details = discoveryDetails(r);
+                        return (
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: 600 }}>
+                              {details.name}
+                            </div>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', marginTop: 2, fontSize: 10, opacity: 0.62 }}>
+                              <span>{details.model || t('wifi.discovery_model_unknown')}</span>
+                              <span>{details.suffix ? `UDID ···${details.suffix}` : t('wifi.discovery_udid_unknown')}</span>
+                              <span style={{ fontFamily: 'monospace' }}>{r.ip}:{r.port}</span>
+                            </div>
+                          </div>
+                        );
+                      })()}
                       <button
                         onClick={() => pickDiscoverResult(r)}
                         style={{

@@ -354,245 +354,26 @@ const App: React.FC = () => {
     }
   }, [ws.connected])
 
-  // Auto-attempt WiFi tunnel on first WS connect if the user previously
-  // saved at least one IP/port AND has the auto-connect toggle on. Runs
-  // once per app session — not on every WS reconnect — to avoid re-
-  // triggering after a backend restart that already restored the tunnel
-  // via the backend's own watchdog. Failures are silent (the WiFi panel
-  // will surface them when the user opens it).
-  //
-  // Multi-device: tries every missing IP/port pair in `locwarp.tunnel.savedips`
-  // in parallel, up to the backend-advertised capacity. Existing USB/tunnel
-  // devices are skipped individually, so one already-connected phone never
-  // prevents its sibling from reconnecting.
+  // Auto-attempt Wi-Fi tunnel on first WS connect. The hook owns the complete
+  // saved-IP → network-context/discovery → UDID-verified handshake, so this
+  // component does not keep a second, less-safe reconnect implementation.
   const wifiAutoConnectAttemptedRef = useRef(false)
   useEffect(() => {
-    if (!ws.connected) return
-    if (wifiAutoConnectAttemptedRef.current) return
-    let enabled: boolean
-    let savedList: Array<{ ip: string; port: number; udid?: string }> = []
-    try {
-      enabled = localStorage.getItem('locwarp.tunnel.autoconnect') !== '0'
-      const raw = localStorage.getItem('locwarp.tunnel.savedips') || '[]'
-      try {
-        const parsed = JSON.parse(raw)
-        if (Array.isArray(parsed)) {
-          savedList = parsed
-            .filter((e) => e && typeof e.ip === 'string' && e.ip.trim())
-            .map((e) => ({
-              ip: String(e.ip).trim(),
-              port: Number(e.port) || 49152,
-              udid: typeof e.udid === 'string' && e.udid ? e.udid : undefined,
-            }))
-        }
-      } catch { /* ignore — fall back to legacy below */ }
-      // Legacy single-IP fallback for upgraders.
-      if (savedList.length === 0) {
-        const legacyIp = (localStorage.getItem('locwarp.tunnel.ip') || '').trim()
-        if (legacyIp) {
-          const portStr = localStorage.getItem('locwarp.tunnel.port') || '49152'
-          savedList = [{ ip: legacyIp, port: parseInt(portStr, 10) || 49152 }]
-        }
-      }
-    } catch {
+    if (!ws.connected) {
+      // A backend restart tears down its worker table.  Treat the next WS
+      // handshake as a fresh startup so every pinned phone is restored again.
+      wifiAutoConnectAttemptedRef.current = false
       return
     }
-    if (!enabled) return
+    if (wifiAutoConnectAttemptedRef.current) return
     wifiAutoConnectAttemptedRef.current = true
-    // Defer so device.scan() and any backend-side restored tunnels have
-    // time to surface in `device.connectedDevices` before we decide
-    // whether auto-connect is needed.
+    // Defer so device.scan() and backend-restored tunnels have time to
+    // surface before the hook decides which UDIDs are actually missing.
     const tid = setTimeout(() => {
-      ;(async () => {
-        try {
-          // Read both sources at execution time rather than trusting the
-          // values captured when this effect was scheduled. This closes the
-          // startup race where USB scan or the backend watchdog restores one
-          // phone during the 1.5-second defer window.
-          const [statusResult, devicesResult] = await Promise.allSettled([
-            api.wifiTunnelStatus(),
-            api.listDevices().catch(() => []),
-          ])
-          // A transient status endpoint failure should not suppress all
-          // reconnect attempts. The device list and saved-IP candidates are
-          // still useful; capacity falls back to the platform-aware hook
-          // value until a later poll receives max_devices.
-          const status = statusResult.status === 'fulfilled'
-            ? statusResult.value
-            : { tunnels: [] as any[], max_devices: undefined }
-          const listedDevices = devicesResult.status === 'fulfilled'
-            ? devicesResult.value
-            : []
-          const connectedUdidSet = new Set<string>(
-            (Array.isArray(listedDevices) ? listedDevices : [])
-              .filter((d: any) => d?.is_connected && typeof d.udid === 'string')
-              .map((d: any) => d.udid),
-          )
-          // If the list endpoint was briefly unavailable, retain the latest
-          // hook snapshot as a conservative duplicate guard.
-          for (const d of device.connectedDevices) {
-            if (d?.is_connected && d.udid) connectedUdidSet.add(d.udid)
-          }
-          const alreadyTunneledUdids = new Set<string>(
-            (status?.tunnels || [])
-              .map((tn) => tn?.udid)
-              .filter((udid): udid is string => typeof udid === 'string' && udid.length > 0),
-          )
-          const occupiedUdids = new Set([...connectedUdidSet, ...alreadyTunneledUdids])
-          const advertisedMax = Number((status as any)?.max_devices)
-          const maxDevices = Number.isFinite(advertisedMax) && advertisedMax > 0
-            ? Math.min(3, Math.max(1, Math.floor(advertisedMax)))
-            : Math.min(3, Math.max(1, Number(device.maxTunnelDevices) || 1))
-          // Two sources for auto-connect candidates:
-          //   1. savedips: previously-connected iPhones (UDID known)
-          //   2. mDNS / subnet discover: iPhones currently broadcasting
-          //      their RemotePairing service (UDID unknown until handshake)
-          // Discover catches the case where a user connected a second
-          // iPhone via the auto-connect path itself (so it never went
-          // through the manual save) — without it, only one iPhone keeps
-          // auto-connecting on every launch even though both are paired.
-          const seen = new Set<string>()
-          const seenUdids = new Set<string>()
-          const uniq: Array<{ ip: string; port: number; udid?: string; ports?: number[] }> = []
-          const addCand = (ip: string, port: number, udid?: string, ports?: number[]) => {
-            const normalizedIp = String(ip || '').trim()
-            const normalizedPort = Number(port) || 49152
-            if (!normalizedIp) return
-            if (udid && (occupiedUdids.has(udid) || seenUdids.has(udid))) return
-            const key = `${normalizedIp}:${normalizedPort}`
-            if (seen.has(key)) return
-            seen.add(key)
-            if (udid) seenUdids.add(udid)
-            uniq.push({ ip: normalizedIp, port: normalizedPort, udid, ports })
-          }
-          // When the user has pinned devices, only auto-connect those UDIDs.
-          // This prevents a friend's device (present on the same WiFi but
-          // in savedips from a previous session) from being auto-connected
-          // on startup (issue #35). If no pins are set, fall back to the
-          // original behaviour so first-time users are unaffected.
-          const pinnedUdids: string[] = []
-          try {
-            const p = JSON.parse(localStorage.getItem('locwarp.tunnel.pinned') || '[]')
-            if (Array.isArray(p)) pinnedUdids.push(...p.filter((x: any) => typeof x === 'string'))
-          } catch { /* ignore */ }
-          const uniquePinnedUdids = Array.from(new Set(pinnedUdids))
-          const hasPins = uniquePinnedUdids.length > 0
-          const occupiedCount = occupiedUdids.size
-          const availableSlots = Math.max(0, maxDevices - occupiedCount)
-
-          // Discovery is intentionally collected once and then reused by the
-          // per-pin fallback workers below. Older backends only return IP and
-          // port here, so the worker passes the desired UDID as a handshake
-          // hint; the backend verifies the peer before it reports success.
-          const discovered: Array<{ ip: string; port: number; udid?: string; ports?: number[] }> = []
-          try {
-            const dres = await api.wifiTunnelDiscover()
-            for (const d of (dres?.devices || [])) {
-              const discoveredUdid = typeof (d as any).udid === 'string' ? (d as any).udid : undefined
-              const ip = String(d.ip || '').trim()
-              if (!ip) continue
-              discovered.push({
-                ip,
-                port: Number(d.port) || 49152,
-                udid: discoveredUdid,
-                ports: Array.isArray(d.ports) ? d.ports : undefined,
-              })
-            }
-          } catch { /* discover failed — savedips entries still try */ }
-
-          // A reconnect pass for pinned phones is one task per missing UDID,
-          // not one task per endpoint. Each task tries its saved endpoint
-          // first, then every currently-discovered endpoint in order. This
-          // handles DHCP changes without allowing an IP-only Bonjour result
-          // to be mistaken for a different pinned phone: the backend's UDID
-          // hint/peer check is the authority. Different phones run in
-          // parallel, while endpoints for one phone remain sequential.
-          if (hasPins) {
-            const savedByUdid = new Map<string, { ip: string; port: number }>()
-            for (const entry of savedList) {
-              if (entry.udid && uniquePinnedUdids.includes(entry.udid) && !savedByUdid.has(entry.udid)) {
-                savedByUdid.set(entry.udid, { ip: entry.ip, port: entry.port })
-              }
-            }
-            const newlyConnected = { count: 0 }
-            const reservations = { count: 0 }
-            const tasks: Array<() => Promise<void>> = uniquePinnedUdids
-              .filter((udid) => !occupiedUdids.has(udid))
-              .map((udid) => async () => {
-                // Reserve a slot for the full saved-IP/discovery sequence.
-                // Without this reservation, a fast success could start a
-                // queued third UDID while another initial worker was still
-                // in flight, briefly exceeding the backend's device limit.
-                if (occupiedCount + newlyConnected.count + reservations.count >= maxDevices) return
-                reservations.count += 1
-                const endpoints: Array<{ ip: string; port: number; ports?: number[] }> = []
-                const seenEndpoints = new Set<string>()
-                const addEndpoint = (ip: string, port: number, ports?: number[]) => {
-                  const key = `${ip}:${port}`
-                  if (seenEndpoints.has(key)) return
-                  seenEndpoints.add(key)
-                  endpoints.push({ ip, port, ports })
-                }
-                const saved = savedByUdid.get(udid)
-                if (saved) addEndpoint(saved.ip, saved.port)
-                for (const candidate of discovered) {
-                  // A discovered UDID is useful when it matches this pin;
-                  // an IP-only result is a fallback candidate whose identity
-                  // is verified by the UDID-hinted backend handshake.
-                  if (candidate.udid && candidate.udid !== udid) continue
-                  addEndpoint(candidate.ip, candidate.port, candidate.ports)
-                }
-                try {
-                  for (const endpoint of endpoints) {
-                    if (occupiedUdids.has(udid)) return
-                    try {
-                      await device.startWifiTunnel(endpoint.ip, endpoint.port, udid, endpoint.ports)
-                      newlyConnected.count += 1
-                      return
-                    } catch {
-                      // Saved IP may be stale; continue with the next
-                      // discovered endpoint for this same UDID.
-                    }
-                  }
-                } finally {
-                  reservations.count -= 1
-                }
-              })
-            const runWithConcurrency = async (jobs: Array<() => Promise<void>>, limit: number) => {
-              let next = 0
-              const worker = async () => {
-                while (next < jobs.length) {
-                  const index = next++
-                  await jobs[index]()
-                }
-              }
-              await Promise.all(Array.from({ length: Math.min(limit, jobs.length) }, worker))
-            }
-            await runWithConcurrency(tasks, availableSlots)
-            return
-          }
-
-          // No pins: retain first-run discovery behaviour. Saved entries and
-          // IP-only discovery candidates are bounded by the advertised
-          // capacity; pinned mode above is the path that needs endpoint-level
-          // fallback after a stale DHCP address.
-          for (const entry of savedList) addCand(entry.ip, entry.port, entry.udid)
-          for (const candidate of discovered) addCand(candidate.ip, candidate.port, candidate.udid, candidate.ports)
-          const limited = uniq.slice(0, availableSlots)
-          if (limited.length === 0) return
-          await Promise.allSettled(
-            limited.map((entry) =>
-              device.startWifiTunnel(entry.ip, entry.port, entry.udid, entry.ports).catch(() => {}),
-            ),
-          )
-        } catch {
-          // Silent — tunnel section will show its own error when opened.
-        }
-      })()
+      void device.autoConnectWifi()
     }, 1500)
     return () => clearTimeout(tid)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ws.connected])
+  }, [ws.connected, device.autoConnectWifi])
 
   // Poll cooldown
   useEffect(() => {
@@ -1706,6 +1487,9 @@ const App: React.FC = () => {
           onTogglePin={device.togglePin}
           connectionHealth={device.connectionHealth}
           maxTunnelDevices={device.maxTunnelDevices}
+          groupSyncStatus={sim.groupSyncStatus}
+          groupMaxAckDeltaMs={sim.groupMaxAckDeltaMs}
+          wifiReconnects={device.wifiReconnects}
         />
         </div>
         <div style={{ display: activePage === 'nav' ? 'block' : 'none' }}>

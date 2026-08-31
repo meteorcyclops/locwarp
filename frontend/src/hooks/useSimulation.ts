@@ -69,6 +69,24 @@ export interface DeviceRuntime {
 
 export type RuntimesMap = Record<string, DeviceRuntime>
 
+export interface GroupSyncStatus {
+  status: 'paused' | 'recovering' | 'recovery_failed' | 'resumed' | 'cancelled' | string
+  phase?: string
+  group_id?: string
+  strict_sync?: boolean
+  ready_count?: number
+  expected_count?: number
+  total?: number
+  attempt?: number
+  max_attempts?: number
+  missing_udids?: string[]
+  trigger_udid?: string
+  reason?: string
+  last_ack_delta_ms?: number
+  max_ack_delta_ms?: number
+  updatedAt: number
+}
+
 function emptyRuntime(udid: string): DeviceRuntime {
   return {
     udid,
@@ -342,6 +360,8 @@ export function useSimulation(subscribe?: WsSubscribe, primaryUdid?: string | nu
 
   // Per-device runtime map (group mode). Populated from WS events tagged with udid.
   const [runtimes, setRuntimes] = useState<RuntimesMap>({})
+  const [groupSyncStatus, setGroupSyncStatus] = useState<GroupSyncStatus | null>(null)
+  const [groupMaxAckDeltaMs, setGroupMaxAckDeltaMs] = useState(0)
   const updateRuntime = useCallback((udid: string, patch: Partial<DeviceRuntime>) => {
     setRuntimes((prev) => {
       const cur = prev[udid] ?? emptyRuntime(udid)
@@ -371,12 +391,26 @@ export function useSimulation(subscribe?: WsSubscribe, primaryUdid?: string | nu
   useEffect(() => {
     if (!subscribe) return
     return subscribe((wsMessage) => {
+    if (wsMessage.type === 'group_sync' && wsMessage.data) {
+      const payload = wsMessage.data as Omit<GroupSyncStatus, 'updatedAt'>
+      setGroupSyncStatus({ ...payload, updatedAt: Date.now() })
+      const maxDelta = Number(payload.max_ack_delta_ms)
+      if (Number.isFinite(maxDelta) && maxDelta >= 0) {
+        setGroupMaxAckDeltaMs((previous) => Math.max(previous, maxDelta))
+      }
+    }
     // ── Group mode: mirror per-device state into `runtimes` map ────────
     const udid: string | undefined = wsMessage.data?.udid
     if (udid) {
       const d = wsMessage.data
       switch (wsMessage.type) {
         case 'position_update':
+          {
+            const maxDelta = Number(d.group_max_ack_delta_ms)
+            if (Number.isFinite(maxDelta) && maxDelta >= 0) {
+              setGroupMaxAckDeltaMs((previous) => Math.max(previous, maxDelta))
+            }
+          }
           updateRuntime(udid, {
             currentPos: (typeof d.lat === 'number' && typeof d.lng === 'number') ? { lat: d.lat, lng: d.lng } : undefined as any,
             progress: d.progress ?? undefined as any,
@@ -1038,6 +1072,8 @@ export function useSimulation(subscribe?: WsSubscribe, primaryUdid?: string | nu
 
   return {
     runtimes,
+    groupSyncStatus,
+    groupMaxAckDeltaMs,
     primaryRuntime,
     anyRunning,
     teleportAll,

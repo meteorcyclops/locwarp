@@ -7,6 +7,77 @@ import {
   type ConnectionHealth, getConnectionDiagnostics,
 } from '../services/api'
 import type { WsMessage } from './useWebSocket'
+import {
+  buildWifiReconnectEndpoints,
+  canonicalUdid,
+  isPairingInvalidError,
+  isUsableWifiEndpoint,
+  networkContextChanged,
+  normalizeIpv4,
+  sameUdid,
+  shouldPersistWifiEndpoint,
+  type WifiNetworkContext,
+  type WifiReconnectEndpoint,
+  type WifiReconnectStatus,
+} from '../utils/wifiReconnect'
+
+export type {
+  WifiNetworkContext,
+  WifiReconnectEndpoint,
+  WifiReconnectStage,
+  WifiReconnectStatus,
+} from '../utils/wifiReconnect'
+
+type ElectronNetworkBridge = {
+  getNetworkContext?: () => Promise<WifiNetworkContext | null | undefined>
+  onNetworkContextChanged?: (callback: (context: WifiNetworkContext) => void) => () => void
+}
+
+function getNetworkBridge(): ElectronNetworkBridge | null {
+  if (typeof window === 'undefined' || !window.electronAPI) return null
+  return window.electronAPI as unknown as ElectronNetworkBridge
+}
+
+function makeWifiError(code: string, message: string): Error & { code: string } {
+  const error = new Error(message) as Error & { code: string }
+  error.code = code
+  return error
+}
+
+// A valid RemotePairing worker can spend up to eight seconds in pair verify,
+// and a changed iOS port adds one bounded re-scan.  The old 2.2s controller
+// aborted healthy cold starts before the worker could publish its identity.
+const SAVED_ENDPOINT_TIMEOUT_MS = 30_000
+const DISCOVERY_TIMEOUT_MS = 22_000
+const TUNNEL_HANDSHAKE_TIMEOUT_MS = 30_000
+const NETWORK_CHANGE_RETRY_DELAY_MS = 300
+
+type ReconnectControllerHandle = {
+  controller: AbortController
+  cancel: () => void
+}
+
+function errorMessage(error: unknown): string {
+  const value = error as { message?: unknown } | null | undefined
+  return String(value?.message ?? error ?? 'Wi-Fi reconnect failed').slice(0, 240)
+}
+
+function createReconnectController(
+  timeoutMs: number,
+  parentSignal?: AbortSignal,
+): ReconnectControllerHandle {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  const onParentAbort = () => controller.abort()
+  parentSignal?.addEventListener('abort', onParentAbort, { once: true })
+  return {
+    controller,
+    cancel: () => {
+      clearTimeout(timer)
+      parentSignal?.removeEventListener('abort', onParentAbort)
+    },
+  }
+}
 
 // The backend may advertise a larger platform-specific limit. Keep the
 // legacy macOS one-tunnel fallback until a newer backend explicitly reports
@@ -50,6 +121,14 @@ export function useDevice(subscribe?: WsSubscribe) {
   const [devices, setDevices] = useState<DeviceInfo[]>([])
   const [connectedDevice, setConnectedDevice] = useState<DeviceInfo | null>(null)
   const [connectionHealth, setConnectionHealth] = useState<ConnectionHealth[]>([])
+  const [wifiNetworkContext, setWifiNetworkContext] = useState<WifiNetworkContext | null>(null)
+  const [wifiReconnects, setWifiReconnects] = useState<Record<string, WifiReconnectStatus>>({})
+  const networkContextRef = useRef<WifiNetworkContext | null>(null)
+  const networkEpochRef = useRef(0)
+  const reconnectAttemptsRef = useRef<Map<string, number>>(new Map())
+  const reconnectAbortControllersRef = useRef<Map<string, Set<AbortController>>>(new Map())
+  const wifiScanControllerRef = useRef<AbortController | null>(null)
+  const autoConnectControllerRef = useRef<AbortController | null>(null)
 
   useEffect(() => {
     let active = true
@@ -256,17 +335,25 @@ export function useDevice(subscribe?: WsSubscribe) {
   )
 
   const scanWifi = useCallback(async () => {
+    wifiScanControllerRef.current?.abort()
+    const controller = new AbortController()
+    wifiScanControllerRef.current = controller
     setWifiScanning(true)
     try {
-      const results = await wifiScan()
+      const results = await wifiScan(controller.signal)
+      if (controller.signal.aborted || wifiScanControllerRef.current !== controller) return []
       const list: WifiScanResult[] = Array.isArray(results) ? results : []
       setWifiDevices(list)
       return list
     } catch (err) {
+      if (controller.signal.aborted) return []
       console.error('WiFi scan failed:', err)
       return []
     } finally {
-      setWifiScanning(false)
+      if (wifiScanControllerRef.current === controller) {
+        wifiScanControllerRef.current = null
+        setWifiScanning(false)
+      }
     }
   }, [])
 
@@ -323,7 +410,15 @@ export function useDevice(subscribe?: WsSubscribe) {
   const readPinned = (): string[] => {
     try {
       const arr = JSON.parse(localStorage.getItem(PIN_KEY) || '[]')
-      return Array.isArray(arr) ? arr.filter((x) => typeof x === 'string') : []
+      if (!Array.isArray(arr)) return []
+      const result: string[] = []
+      for (const value of arr) {
+        if (typeof value !== 'string' || !value.trim()) continue
+        // Keep the first spelling for the UI, but de-duplicate identities
+        // case-insensitively for reconnect scheduling.
+        if (!result.some((existing) => sameUdid(existing, value))) result.push(value.trim())
+      }
+      return result
     } catch { return [] }
   }
   const [pinnedUdids, setPinnedUdids] = useState<string[]>(readPinned)
@@ -333,122 +428,296 @@ export function useDevice(subscribe?: WsSubscribe) {
   tunnelsRef.current = tunnels
   const pinRetryTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({})
   const pinReconnectInFlightRef = useRef<Set<string>>(new Set())
+  const reconnectInFlightEpochRef = useRef<Map<string, number>>(new Map())
   // Set after startWifiTunnel is defined below; the retry loop calls
   // through the ref so we avoid a definition-order cycle.
-  const startWifiTunnelRef = useRef<((ip: string, port?: number, udidHint?: string, portHints?: number[]) => Promise<any>) | null>(null)
+  const startWifiTunnelRef = useRef<((ip: string, port?: number, udidHint?: string, portHints?: number[], signal?: AbortSignal, rescan?: boolean) => Promise<any>) | null>(null)
 
-  const clearPinRetry = useCallback((udid: string) => {
-    const tmr = pinRetryTimers.current[udid]
-    if (tmr) { clearTimeout(tmr); delete pinRetryTimers.current[udid] }
+  const updateWifiReconnect = useCallback((
+    udid: string,
+    stage: WifiReconnectStatus['stage'],
+    details: Partial<WifiReconnectStatus> = {},
+  ) => {
+    const key = canonicalUdid(udid)
+    if (!key) return
+    setWifiReconnects((previous) => {
+      const existing = previous[key]
+      const attempt = details.attempt ?? existing?.attempt ?? reconnectAttemptsRef.current.get(key) ?? 0
+      return {
+        ...previous,
+        [key]: {
+          udid: details.udid ?? existing?.udid ?? udid,
+          stage,
+          attempt,
+          networkSignature: details.networkSignature ?? existing?.networkSignature ?? networkContextRef.current?.signature,
+          updatedAt: Date.now(),
+          ...details,
+        },
+      }
+    })
   }, [])
 
-  const readSavedEntryFor = (udid: string): { ip: string; port: number } | null => {
+  const trackReconnectController = useCallback((udid: string, controller: AbortController) => {
+    const key = canonicalUdid(udid)
+    const controllers = reconnectAbortControllersRef.current.get(key) ?? new Set<AbortController>()
+    controllers.add(controller)
+    reconnectAbortControllersRef.current.set(key, controllers)
+    return () => {
+      controllers.delete(controller)
+      if (controllers.size === 0) reconnectAbortControllersRef.current.delete(key)
+    }
+  }, [])
+
+  const hasConnectedUdid = (udid: string): boolean =>
+    devicesRef.current.some((device) => sameUdid(device.udid, udid) && device.is_connected)
+
+  const hasTunnelUdid = (udid: string): boolean =>
+    tunnelsRef.current.some((tunnel) => sameUdid(tunnel.udid, udid))
+
+  const clearPinRetry = useCallback((udid: string) => {
+    const key = canonicalUdid(udid)
+    const tmr = pinRetryTimers.current[key]
+    if (tmr) { clearTimeout(tmr); delete pinRetryTimers.current[key] }
+  }, [])
+
+  const readSavedEntryFor = (udid: string): WifiReconnectEndpoint | null => {
     try {
       const arr = JSON.parse(localStorage.getItem('locwarp.tunnel.savedips') || '[]')
       if (!Array.isArray(arr)) return null
-      const hit = arr.find((e: any) => e && e.udid === udid && typeof e.ip === 'string')
-      if (hit) return { ip: hit.ip, port: Number(hit.port) || 49152 }
+      const hit = arr.find((e: any) => e && sameUdid(e.udid, udid) && typeof e.ip === 'string')
+      if (hit) {
+        return {
+          ip: hit.ip,
+          port: Number(hit.port) || 49152,
+          udid: hit.udid,
+          name: typeof hit.name === 'string' ? hit.name : undefined,
+        }
+      }
     } catch { /* ignore */ }
     return null
   }
 
   const schedulePinReconnect = useCallback((udid: string, delayMs = 5000) => {
-    if (pinRetryTimers.current[udid]) return // already scheduled
+    const key = canonicalUdid(udid)
+    if (!key || pinRetryTimers.current[key]) return // already scheduled
     const attempt = async () => {
-      delete pinRetryTimers.current[udid]
+      delete pinRetryTimers.current[key]
       // Stop if the user unpinned, the device/tunnel already came back, or a
       // prior retry for this UDID is still handshaking.
-      if (!pinnedRef.current.includes(udid)) return
-      if (pinReconnectInFlightRef.current.has(udid)) return
-      if (devicesRef.current.some((d) => d.udid === udid && d.is_connected)) return
-      if (tunnelsRef.current.some((tn) => tn.udid === udid)) return
+      if (!pinnedRef.current.some((pinned) => sameUdid(pinned, key))) return
+      if (pinReconnectInFlightRef.current.has(key)) {
+        // A previous attempt may belong to a network epoch that was just
+        // cancelled. Let the new epoch take the slot, while its finally block
+        // is prevented from deleting the new attempt's reservation below.
+        if (reconnectInFlightEpochRef.current.get(key) === networkEpochRef.current) return
+        pinReconnectInFlightRef.current.delete(key)
+        reconnectInFlightEpochRef.current.delete(key)
+      }
+      if (hasConnectedUdid(key) || hasTunnelUdid(key)) {
+        updateWifiReconnect(key, 'connected')
+        return
+      }
 
       // Respect the backend-advertised worker capacity. In-flight pin
       // retries reserve slots as well, preventing a 15s timer storm from
       // creating duplicate workers while another device is reconnecting.
       const capacity = Math.max(1, Math.min(PRODUCT_MAX_TUNNEL_DEVICES, Math.floor(Number(maxTunnelDevicesRef.current) || DEFAULT_MAX_TUNNEL_DEVICES)))
-      if (tunnelsRef.current.length + pinReconnectInFlightRef.current.size >= capacity) {
-        schedulePinReconnect(udid, 15000)
+      const occupiedCount = new Set([
+        ...devicesRef.current.filter((device) => device.is_connected).map((device) => canonicalUdid(device.udid)),
+        ...tunnelsRef.current.map((tunnel) => canonicalUdid(tunnel.udid)),
+      ].filter(Boolean)).size
+      if (occupiedCount + pinReconnectInFlightRef.current.size >= capacity) {
+        schedulePinReconnect(key, 15000)
         return
       }
 
-      pinReconnectInFlightRef.current.add(udid)
+      const epoch = networkEpochRef.current
+      const networkSignature = networkContextRef.current?.signature
+      const attemptNumber = (reconnectAttemptsRef.current.get(key) ?? 0) + 1
+      reconnectAttemptsRef.current.set(key, attemptNumber)
+      pinReconnectInFlightRef.current.add(key)
+      reconnectInFlightEpochRef.current.set(key, epoch)
       let success = false
-      try {
-        const endpoints: Array<{ ip: string; port: number; ports?: number[] }> = []
-        const seenEndpoints = new Set<string>()
-        const addEndpoint = (ip: string, port: number, ports?: number[]) => {
-          const normalizedIp = String(ip || '').trim()
-          const normalizedPort = Number(port) || 49152
-          if (!normalizedIp) return
-          const key = `${normalizedIp}:${normalizedPort}`
-          if (seenEndpoints.has(key)) return
-          seenEndpoints.add(key)
-          endpoints.push({ ip: normalizedIp, port: normalizedPort, ports })
-        }
-        const saved = readSavedEntryFor(udid)
-        if (saved) addEndpoint(saved.ip, saved.port)
-        try {
-          const discovered = await wifiTunnelDiscover()
-          for (const candidate of (discovered?.devices || [])) {
-            const candidateUdid = typeof candidate.udid === 'string' ? candidate.udid : undefined
-            // Newer discovery may identify the phone; older discovery only
-            // gives an IP. Unknown candidates are safe here because the
-            // UDID-hinted handshake below verifies the peer before success.
-            if (candidateUdid && candidateUdid !== udid) continue
-            addEndpoint(candidate.ip, candidate.port, candidate.ports)
-          }
-        } catch { /* saved endpoint can still be retried */ }
+      let pairingInvalid = false
+      let lastError = ''
 
-        for (const endpoint of endpoints) {
-          if (!pinnedRef.current.includes(udid)) return
-          if (devicesRef.current.some((d) => d.udid === udid && d.is_connected)) return
-          if (tunnelsRef.current.some((tn) => tn.udid === udid)) return
-          if (!startWifiTunnelRef.current) break
-          try {
-            await startWifiTunnelRef.current(endpoint.ip, endpoint.port, udid, endpoint.ports)
-            success = true
-            return // success path clears the timer via startWifiTunnel
-          } catch {
-            // The saved DHCP address may be stale. Try the next discovered
-            // endpoint for this same UDID before backing off.
+      const epochCurrent = () =>
+        networkEpochRef.current === epoch
+        && pinnedRef.current.some((pinned) => sameUdid(pinned, key))
+      const current = () =>
+        epochCurrent()
+        && !hasConnectedUdid(key)
+        && !hasTunnelUdid(key)
+
+      const tryEndpoint = async (
+        endpoint: WifiReconnectEndpoint,
+        stage: WifiReconnectStatus['stage'],
+        timeoutMs: number,
+      ): Promise<'connected' | 'retry' | 'stale' | 'repair'> => {
+        if (!current() || !startWifiTunnelRef.current) return 'stale'
+        updateWifiReconnect(key, stage, {
+          attempt: attemptNumber,
+          ip: endpoint.ip,
+          name: endpoint.name,
+          error: undefined,
+          requiresUsbRepair: false,
+          networkSignature,
+        })
+        const request = createReconnectController(timeoutMs)
+        const untrack = trackReconnectController(key, request.controller)
+        try {
+          await startWifiTunnelRef.current(
+            endpoint.ip,
+            endpoint.port,
+            key,
+            endpoint.ports,
+            request.controller.signal,
+            stage !== 'tunnel',
+          )
+          // A successful start mutates the connected/tunnel stores.  At this
+          // point that is the desired result, not evidence that the attempt
+          // became stale; only an epoch/pin change may invalidate it.
+          if (!epochCurrent() || request.controller.signal.aborted) return 'stale'
+          success = true
+          updateWifiReconnect(key, 'connected', {
+            attempt: attemptNumber,
+            ip: endpoint.ip,
+            name: endpoint.name,
+            networkSignature,
+          })
+          return 'connected'
+        } catch (error) {
+          if (networkEpochRef.current !== epoch || !pinnedRef.current.some((pinned) => sameUdid(pinned, key))) {
+            return 'stale'
           }
+          if (isPairingInvalidError(error)) {
+            pairingInvalid = true
+            lastError = errorMessage(error)
+            updateWifiReconnect(key, 'needs_usb_repair', {
+              attempt: attemptNumber,
+              ip: endpoint.ip,
+              name: endpoint.name,
+              error: lastError,
+              requiresUsbRepair: true,
+              networkSignature,
+            })
+            return 'repair'
+          }
+          // An endpoint timeout is deliberately treated as a normal fallback
+          // failure. A network-epoch abort, by contrast, must never continue
+          // with an old IP; the caller checks the epoch before proceeding.
+          lastError = errorMessage(error)
+          return 'retry'
+        } finally {
+          request.cancel()
+          untrack()
+        }
+      }
+
+      try {
+        const saved = readSavedEntryFor(udid)
+        // The remembered endpoint gets one short probe first. Do not open a
+        // socket for an old subnet, a link-local address, or an endpoint
+        // explicitly marked unreachable by discovery.
+        if (saved && isUsableWifiEndpoint(saved, networkContextRef.current)) {
+          const savedResult = await tryEndpoint(saved, 'last_ip', SAVED_ENDPOINT_TIMEOUT_MS)
+          if (savedResult === 'connected' || savedResult === 'repair' || savedResult === 'stale') return
+        }
+
+        if (!current()) return
+        updateWifiReconnect(key, 'network_changed_discovery', {
+          attempt: attemptNumber,
+          error: undefined,
+          requiresUsbRepair: false,
+          networkSignature,
+        })
+        const discovery = createReconnectController(DISCOVERY_TIMEOUT_MS)
+        const untrackDiscovery = trackReconnectController(key, discovery.controller)
+        let discovered: WifiReconnectEndpoint[] = []
+        try {
+          const result = await wifiTunnelDiscover(discovery.controller.signal)
+          if (current() && !discovery.controller.signal.aborted) {
+            discovered = (result?.devices || []).map((candidate) => ({
+              ip: candidate.ip,
+              port: candidate.port,
+              ports: candidate.ports,
+              udid: candidate.udid,
+              name: candidate.name,
+              host: candidate.host,
+              reachable: candidate.reachable,
+              unreachable: candidate.unreachable,
+            }))
+          }
+        } catch (error) {
+          if (networkEpochRef.current !== epoch) return
+          lastError = errorMessage(error)
+        } finally {
+          discovery.cancel()
+          untrackDiscovery()
+        }
+        if (!current()) return
+
+        const endpoints = buildWifiReconnectEndpoints(key, null, discovered, networkContextRef.current)
+        for (const endpoint of endpoints) {
+          if (!current()) return
+          if (endpoint.name || endpoint.host) {
+            updateWifiReconnect(key, 'found_name', {
+              attempt: attemptNumber,
+              ip: endpoint.ip,
+              name: endpoint.name || endpoint.host,
+              networkSignature,
+            })
+          }
+          const endpointResult = await tryEndpoint(endpoint, 'tunnel', TUNNEL_HANDSHAKE_TIMEOUT_MS)
+          if (endpointResult === 'connected' || endpointResult === 'repair' || endpointResult === 'stale') return
         }
       } finally {
-        pinReconnectInFlightRef.current.delete(udid)
-        if (!success && pinnedRef.current.includes(udid)
-          && !devicesRef.current.some((d) => d.udid === udid && d.is_connected)
-          && !tunnelsRef.current.some((tn) => tn.udid === udid)) {
-          schedulePinReconnect(udid, 15000)
+        if (reconnectInFlightEpochRef.current.get(key) === epoch) {
+          pinReconnectInFlightRef.current.delete(key)
+          reconnectInFlightEpochRef.current.delete(key)
+        }
+        if (!success && !pairingInvalid && current()) {
+          updateWifiReconnect(key, 'failed', {
+            attempt: attemptNumber,
+            error: lastError || '找不到可用的 Wi-Fi endpoint',
+            requiresUsbRepair: false,
+            networkSignature,
+          })
+          schedulePinReconnect(key, 15000)
         }
       }
     }
-    pinRetryTimers.current[udid] = setTimeout(attempt, delayMs)
-  }, [])
+    pinRetryTimers.current[key] = setTimeout(attempt, delayMs)
+  }, [trackReconnectController, updateWifiReconnect])
 
   const PIN_IP_MAP_KEY = 'locwarp.tunnel.pin_ip_map'
 
   const togglePin = useCallback((udid: string) => {
+    const key = canonicalUdid(udid)
+    if (!key) return
     setPinnedUdids((prev) => {
-      const next = prev.includes(udid) ? prev.filter((u) => u !== udid) : [...prev, udid]
+      const isPinned = prev.some((pinned) => sameUdid(pinned, key))
+      const next = isPinned
+        ? prev.filter((pinned) => !sameUdid(pinned, key))
+        : [...prev, udid.trim()]
       try { localStorage.setItem(PIN_KEY, JSON.stringify(next)) } catch { /* ignore */ }
-      if (!next.includes(udid)) {
-        clearPinRetry(udid)
+      if (!next.some((pinned) => sameUdid(pinned, key))) {
+        clearPinRetry(key)
         // Remove IP mapping when unpinning so the device is no longer
         // auto-connected on next startup (issue #35).
         try {
           const map = JSON.parse(localStorage.getItem(PIN_IP_MAP_KEY) || '{}')
-          delete map[udid]
+          delete map[key]
           localStorage.setItem(PIN_IP_MAP_KEY, JSON.stringify(map))
         } catch { /* ignore */ }
       } else {
         // Save last known IP when pinning so startup auto-connect can
         // filter to pinned devices only (issue #35).
-        const entry = readSavedEntryFor(udid)
+        const entry = readSavedEntryFor(key)
         if (entry) {
           try {
             const map = JSON.parse(localStorage.getItem(PIN_IP_MAP_KEY) || '{}')
-            map[udid] = `${entry.ip}:${entry.port}`
+            map[key] = `${entry.ip}:${entry.port}`
             localStorage.setItem(PIN_IP_MAP_KEY, JSON.stringify(map))
           } catch { /* ignore */ }
         }
@@ -464,7 +733,7 @@ export function useDevice(subscribe?: WsSubscribe) {
     return subscribe((msg) => {
       if (msg.type === 'tunnel_lost') {
         const udid = msg.data?.udid
-        if (udid && pinnedRef.current.includes(udid)) schedulePinReconnect(udid)
+        if (udid && pinnedRef.current.some((pinned) => sameUdid(pinned, udid))) schedulePinReconnect(udid)
       } else if (msg.type === 'tunnel_recovered' || msg.type === 'device_connected') {
         const udid = msg.data?.udid
         if (udid) clearPinRetry(udid)
@@ -510,9 +779,17 @@ export function useDevice(subscribe?: WsSubscribe) {
   }, [subscribe])
 
   const startWifiTunnel = useCallback(
-    async (ip: string, port = 49152, udidHint?: string, portHints?: number[]) => {
+    async (ip: string, port = 49152, udidHint?: string, portHints?: number[], signal?: AbortSignal, rescan = true) => {
       try {
-        const res = await wifiTunnelStartAndConnect(ip, port, udidHint, portHints)
+        if (signal?.aborted) throw makeWifiError('network_changed', 'Wi-Fi network changed')
+        const contextAtStart = networkContextRef.current
+        const res = await wifiTunnelStartAndConnect(ip, port, udidHint, portHints, signal, rescan)
+        if (signal?.aborted) throw makeWifiError('network_changed', 'Wi-Fi network changed')
+        const actualUdid = canonicalUdid(res?.udid)
+        if (!actualUdid) throw makeWifiError('udid_missing', 'Tunnel did not report a device identity')
+        if (udidHint && !sameUdid(udidHint, actualUdid)) {
+          throw makeWifiError('udid_mismatch', 'Tunnel identity did not match the requested device')
+        }
         if (res?.max_devices != null) {
           setMaxTunnelDevices(normalizeTunnelCapacity(res.max_devices))
         }
@@ -532,46 +809,49 @@ export function useDevice(subscribe?: WsSubscribe) {
         // active yet; subsequent workers stay visible in connectedDevices.
         setConnectedDevice((prev) => prev && prev.is_connected ? prev : info)
         setDevices((prev) => {
-          const filtered = prev.filter((d) => d.udid !== info.udid)
+          const filtered = prev.filter((d) => !sameUdid(d.udid, info.udid))
           return [...filtered, info]
         })
         setTunnels((prev) => {
-          const filtered = prev.filter((tn) => tn.udid !== res.udid)
+          const filtered = prev.filter((tn) => !sameUdid(tn.udid, actualUdid))
           return [...filtered, {
             udid: res.udid,
             rsd_address: res.rsd_address,
             rsd_port: res.rsd_port,
           }]
         })
-        // Persist every successful tunnel into savedips, regardless of
-        // who initiated it (manual button, launch auto-connect, mDNS
-        // discover-and-connect). Without this, an iPhone that was
-        // connected via auto-discovery never gets remembered, and the
-        // next launch only auto-connects whichever iPhone the user once
-        // manually clicked through. v0.2.110 bug surfaced when a user
-        // with two iPhones only had one of them in savedips.
+        // Persist only an endpoint whose peer identity was returned by the
+        // backend and whose address still belongs to the current LAN. This
+        // prevents an IP-only Bonjour result, a stale DHCP address, or a
+        // link-local interface from poisoning the next reconnect attempt.
         try {
-          const raw = localStorage.getItem('locwarp.tunnel.savedips') || '[]'
-          const list = (() => {
-            try { return JSON.parse(raw) as Array<{ ip: string; port: number; udid?: string; name?: string; lastUsed: number }> }
-            catch { return [] }
-          })()
-          const baseList = Array.isArray(list) ? list : []
-          // Dedup by both (ip, port) AND by udid — covers the case where
-          // an iPhone reconnects on a NEW DHCP-assigned IP. Without the
-          // udid dedup we'd accumulate stale IPs for the same device.
-          const filtered = baseList.filter((e) =>
-            e && !(e.ip === ip && (e.port === port || e.port === usedPort))
-            && !(res.udid && e.udid === res.udid)
-          )
-          // Persist the device name too so the panel can keep showing the
-          // real phone name after a WiFi drop instead of a raw UDID
-          // (issue #33).
-          const next = [{ ip, port: usedPort, udid: res.udid, name: res.name, lastUsed: Date.now() }, ...filtered].slice(0, 5)
-          localStorage.setItem('locwarp.tunnel.savedips', JSON.stringify(next))
+          const persistedIp = normalizeIpv4(res?.ip) ?? normalizeIpv4(ip)
+          const saveEndpoint: WifiReconnectEndpoint | null = persistedIp
+            ? { ip: persistedIp, port: usedPort, udid: actualUdid, name: res.name }
+            : null
+          if (saveEndpoint && shouldPersistWifiEndpoint(udidHint, actualUdid, saveEndpoint, contextAtStart)) {
+            const raw = localStorage.getItem('locwarp.tunnel.savedips') || '[]'
+            const list = (() => {
+              try { return JSON.parse(raw) as Array<{ ip: string; port: number; udid?: string; name?: string; lastUsed: number }> }
+              catch { return [] }
+            })()
+            const baseList = Array.isArray(list) ? list : []
+            const filtered = baseList.filter((entry) =>
+              entry && !sameUdid(entry.udid, actualUdid)
+              && !(normalizeIpv4(entry.ip) === saveEndpoint.ip && Number(entry.port) === usedPort)
+            )
+            const next = [{
+              ip: saveEndpoint.ip,
+              port: usedPort,
+              udid: actualUdid,
+              name: res.name,
+              lastUsed: Date.now(),
+            }, ...filtered].slice(0, 5)
+            localStorage.setItem('locwarp.tunnel.savedips', JSON.stringify(next))
+          }
         } catch { /* storage disabled */ }
         // A successful connect clears any pending pin-retry for this device.
-        clearPinRetry(res.udid)
+        clearPinRetry(actualUdid)
         return { ...info, port: usedPort }
       } catch (err) {
         console.error('WiFi tunnel failed:', err)
@@ -583,6 +863,242 @@ export function useDevice(subscribe?: WsSubscribe) {
   // Expose the latest startWifiTunnel to the pin-retry loop without making
   // it a hook dependency (the callback is stable, deps: []).
   startWifiTunnelRef.current = startWifiTunnel
+
+  // Backend startup can restore a device before the renderer subscribes to
+  // its connected event. Reconcile transient UI stages against the current
+  // authoritative device/tunnel snapshots so a successful reconnect never
+  // remains labelled as discovery or failure.
+  useEffect(() => {
+    const connectedKeys = new Set([
+      ...devices.filter((item) => item.is_connected).map((item) => canonicalUdid(item.udid)),
+      ...tunnels.map((item) => canonicalUdid(item.udid)),
+    ].filter(Boolean))
+    if (connectedKeys.size === 0) return
+    setWifiReconnects((previous) => {
+      let changed = false
+      const next = { ...previous }
+      for (const key of connectedKeys) {
+        const status = next[key]
+        if (!status || status.stage === 'connected') continue
+        next[key] = { ...status, stage: 'connected', error: undefined, requiresUsbRepair: false, updatedAt: Date.now() }
+        changed = true
+      }
+      return changed ? next : previous
+    })
+  }, [devices, tunnels])
+
+  // The renderer does not own the network interface, but it does own the
+  // retry work.  A network epoch makes every in-flight saved-IP/discovery
+  // attempt stale as soon as macOS moves to another interface or subnet.
+  // This is intentionally placed after schedulePinReconnect so a change can
+  // immediately queue the pinned UDIDs on the new network.
+  useEffect(() => {
+    const bridge = getNetworkBridge()
+    if (!bridge) return
+    let active = true
+
+    const applyNetworkContext = (next: WifiNetworkContext | null | undefined) => {
+      if (!active || !next) return
+      const previous = networkContextRef.current
+      const changed = networkContextChanged(previous, next)
+      networkContextRef.current = next
+      setWifiNetworkContext(next)
+      if (!changed) return
+
+      networkEpochRef.current += 1
+      wifiScanControllerRef.current?.abort()
+      autoConnectControllerRef.current?.abort()
+      for (const controllers of reconnectAbortControllersRef.current.values()) {
+        for (const controller of controllers) controller.abort()
+      }
+      for (const key of Object.keys(pinRetryTimers.current)) clearPinRetry(key)
+      // Do not tear down an already-healthy tunnel here.  Only missing pins
+      // are rescheduled; the backend watchdog owns live socket recovery.
+      for (const udid of pinnedRef.current) schedulePinReconnect(udid, NETWORK_CHANGE_RETRY_DELAY_MS)
+    }
+
+    const unsubscribe = bridge.onNetworkContextChanged?.(applyNetworkContext)
+    const initialContext = bridge.getNetworkContext?.()
+    if (initialContext) {
+      void initialContext.then((context) => applyNetworkContext(context))
+        .catch(() => { /* Electron bridge may be unavailable during startup */ })
+    }
+
+    return () => {
+      active = false
+      unsubscribe?.()
+      autoConnectControllerRef.current?.abort()
+      wifiScanControllerRef.current?.abort()
+      for (const controllers of reconnectAbortControllersRef.current.values()) {
+        for (const controller of controllers) controller.abort()
+      }
+      for (const key of Object.keys(pinRetryTimers.current)) clearPinRetry(key)
+    }
+  }, [clearPinRetry, schedulePinReconnect])
+
+  const autoConnectWifi = useCallback(async (): Promise<void> => {
+    let enabled = true
+    try { enabled = localStorage.getItem('locwarp.tunnel.autoconnect') !== '0' } catch { /* ignore */ }
+    if (!enabled) return
+
+    autoConnectControllerRef.current?.abort()
+    const controller = new AbortController()
+    autoConnectControllerRef.current = controller
+    const epoch = networkEpochRef.current
+    const current = () => networkEpochRef.current === epoch && !controller.signal.aborted
+
+    try {
+      // The event subscription normally populates this first. Awaiting the
+      // bridge here also makes cold-start deterministic when the websocket
+      // becomes ready before Electron's first network poll.
+      if (!networkContextRef.current) {
+        const context = await getNetworkBridge()?.getNetworkContext?.()
+        if (context && current()) {
+          networkContextRef.current = context
+          setWifiNetworkContext(context)
+        }
+      }
+      if (!current()) return
+
+      const [statusResult, devicesResult] = await Promise.allSettled([
+        wifiTunnelStatus(controller.signal),
+        listDevices(controller.signal),
+      ])
+      if (!current()) return
+      const status = statusResult.status === 'fulfilled'
+        ? statusResult.value
+        : { tunnels: [] as TunnelInfo[], max_devices: undefined }
+      const listedDevices = devicesResult.status === 'fulfilled' && Array.isArray(devicesResult.value)
+        ? devicesResult.value
+        : []
+      const activeTunnels = Array.isArray(status.tunnels) ? status.tunnels : []
+      // Keep refs in lock-step for the immediate pass; React state will cause
+      // the normal render/poll reconciliation afterwards.
+      tunnelsRef.current = activeTunnels
+      setTunnels(activeTunnels)
+      const advertisedMax = Number((status as { max_devices?: unknown }).max_devices)
+      const maxDevices = Number.isFinite(advertisedMax) && advertisedMax > 0
+        ? Math.min(PRODUCT_MAX_TUNNEL_DEVICES, Math.max(1, Math.floor(advertisedMax)))
+        : Math.min(PRODUCT_MAX_TUNNEL_DEVICES, Math.max(1, Number(maxTunnelDevicesRef.current) || DEFAULT_MAX_TUNNEL_DEVICES))
+      if (Number.isFinite(advertisedMax) && advertisedMax > 0) setMaxTunnelDevices(maxDevices)
+
+      const occupiedUdids = new Set<string>()
+      for (const device of listedDevices) {
+        if (device?.is_connected && device.udid) occupiedUdids.add(canonicalUdid(device.udid))
+      }
+      for (const tunnel of activeTunnels) {
+        if (tunnel?.udid) occupiedUdids.add(canonicalUdid(tunnel.udid))
+      }
+
+      const saved: WifiReconnectEndpoint[] = []
+      try {
+        const raw = JSON.parse(localStorage.getItem('locwarp.tunnel.savedips') || '[]')
+        if (Array.isArray(raw)) {
+          for (const entry of raw) {
+            if (!entry || typeof entry.ip !== 'string') continue
+            saved.push({
+              ip: entry.ip,
+              port: Number(entry.port) || 49152,
+              udid: typeof entry.udid === 'string' ? entry.udid : undefined,
+              name: typeof entry.name === 'string' ? entry.name : undefined,
+            })
+          }
+        }
+      } catch { /* ignore malformed savedips */ }
+      // Keep the pre-multi-device single-IP preference as a one-entry
+      // migration fallback. It still goes through the same subnet/link-local
+      // validator before any connection attempt.
+      if (saved.length === 0) {
+        try {
+          const legacyIp = localStorage.getItem('locwarp.tunnel.ip') || ''
+          if (legacyIp.trim()) {
+            saved.push({
+              ip: legacyIp,
+              port: Number(localStorage.getItem('locwarp.tunnel.port')) || 49152,
+            })
+          }
+        } catch { /* ignore legacy storage */ }
+      }
+
+      const pinned = Array.from(new Set(pinnedRef.current.map(canonicalUdid).filter(Boolean)))
+      const availableSlots = Math.max(0, maxDevices - occupiedUdids.size)
+      if (pinned.length > 0) {
+        // Reuse the same per-UDID transaction used for long-outage retries.
+        // Scheduling all missing pins is safe: each timer reserves its own
+        // slot and different UDIDs can handshake in parallel.
+        let scheduled = 0
+        for (const udid of pinned) {
+          if (occupiedUdids.has(udid) || scheduled >= availableSlots) continue
+          scheduled += 1
+          schedulePinReconnect(udid, 0)
+        }
+        return
+      }
+
+      const discovery = createReconnectController(DISCOVERY_TIMEOUT_MS, controller.signal)
+      let discovered: WifiReconnectEndpoint[] = []
+      try {
+        const result = await wifiTunnelDiscover(discovery.controller.signal)
+        if (current() && !discovery.controller.signal.aborted) {
+          discovered = (result?.devices || []).map((candidate) => ({
+            ip: candidate.ip,
+            port: candidate.port,
+            ports: candidate.ports,
+            udid: candidate.udid,
+            name: candidate.name,
+            host: candidate.host,
+            reachable: candidate.reachable,
+            unreachable: candidate.unreachable,
+          }))
+        }
+      } catch { /* saved entries may still be usable */ }
+      discovery.cancel()
+      if (!current()) return
+
+      const endpoints = buildWifiReconnectEndpoints(
+        '',
+        null,
+        [...saved, ...discovered],
+        networkContextRef.current,
+      ).filter((endpoint) => !endpoint.udid || !occupiedUdids.has(canonicalUdid(endpoint.udid)))
+      if (endpoints.length === 0 || availableSlots === 0) return
+
+      // Group known endpoints by identity so the same phone cannot receive
+      // parallel starts. IP-only candidates remain individually addressable;
+      // the backend's response identity is still required before saving.
+      const groups = new Map<string, WifiReconnectEndpoint[]>()
+      for (const endpoint of endpoints) {
+        const key = endpoint.udid ? `udid:${canonicalUdid(endpoint.udid)}` : `ip:${endpoint.ip}:${endpoint.port}`
+        const group = groups.get(key) ?? []
+        group.push(endpoint)
+        groups.set(key, group)
+      }
+      const selectedGroups = Array.from(groups.values()).slice(0, availableSlots)
+      await Promise.allSettled(selectedGroups.map(async (group) => {
+        for (const endpoint of group) {
+          if (!current()) return
+          const request = createReconnectController(TUNNEL_HANDSHAKE_TIMEOUT_MS, controller.signal)
+          try {
+            await startWifiTunnel(
+              endpoint.ip,
+              endpoint.port,
+              endpoint.udid,
+              endpoint.ports,
+              request.controller.signal,
+            )
+            return
+          } catch {
+            // Try the next endpoint for this identity, if discovery supplied
+            // more than one port/address.
+          } finally {
+            request.cancel()
+          }
+        }
+      }))
+    } finally {
+      if (autoConnectControllerRef.current === controller) autoConnectControllerRef.current = null
+    }
+  }, [schedulePinReconnect, startWifiTunnel])
 
   const checkTunnelStatus = useCallback(async () => {
     try {
@@ -648,5 +1164,6 @@ export function useDevice(subscribe?: WsSubscribe) {
     connectedDevices, primaryDevice,
     pinnedUdids, togglePin,
     connectionHealth,
+    wifiNetworkContext, wifiReconnects, autoConnectWifi,
   }
 }

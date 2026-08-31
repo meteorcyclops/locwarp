@@ -24,6 +24,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from config import API_HOST, API_PORT, SETTINGS_FILE, DEFAULT_LOCATION
 from security import DesktopApiSecurityMiddleware
 from core.device_manager import DeviceManager
+from core.group_sync import GroupSyncCoordinator
 from services.cooldown import CooldownTimer
 from services.bookmarks import BookmarkManager
 from services.route_store import RouteManager
@@ -82,6 +83,10 @@ class AppState:
         self.coord_formatter = CoordinateFormatter()
         self.reconnect_manager = None
         self.connection_health = ConnectionHealthTracker()
+        # Cross-device strict synchronization policy.  The coordinator is
+        # intentionally separate from DeviceManager: transport recovery is
+        # per-UDID, while a live group must pause/resume as one unit.
+        self.group_sync = GroupSyncCoordinator(self, strict_sync=True)
         self._last_position = None
         # User-chosen initial map center (persisted between launches). When
         # None, the frontend falls back to a hardcoded default.
@@ -188,6 +193,14 @@ class AppState:
             if udid in self.simulation_engines:
                 return
             await self._create_engine_once(udid)
+            # A rebuilt engine is marked as rejoined here, but reconciliation
+            # is deferred until the reconnect path has supplied its fresh
+            # tunnel (or its resume state).  This avoids racing the existing
+            # WiFi watchdog's resume_from_snapshot task.
+            try:
+                await self.group_sync.engine_created(udid)
+            except Exception:
+                logger.debug("group sync: engine-created hook failed", exc_info=True)
 
     async def _create_engine_once(self, udid: str):
         """Create a SimulationEngine for the connected device.
@@ -220,6 +233,14 @@ class AppState:
                     phase=details.get("phase"),
                 )
                 await broadcast("connection_health", health)
+                try:
+                    await self.group_sync.handle_location_health(
+                        udid,
+                        channel_state,
+                        reason=details.get("reason"),
+                    )
+                except Exception:
+                    logger.debug("group sync: recovering hook failed", exc_info=True)
                 return
             health = self.connection_health.record_location_success(
                 udid,
@@ -227,6 +248,14 @@ class AppState:
             )
             if previous.get("location_channel_state") == "recovering":
                 await broadcast("connection_health", health)
+            try:
+                await self.group_sync.handle_location_health(
+                    udid,
+                    channel_state,
+                    reason=details.get("reason"),
+                )
+            except Exception:
+                logger.debug("group sync: healthy hook failed", exc_info=True)
 
         set_health_callback = getattr(loc_service, "set_health_callback", None)
         if callable(set_health_callback):
@@ -236,11 +265,20 @@ class AppState:
             # Always tag emissions with udid so the frontend can route per-device.
             if isinstance(data, dict) and "udid" not in data:
                 data = {**data, "udid": udid}
-            await broadcast(event_type, data)
+            if event_type == "state_change":
+                try:
+                    await self.group_sync.handle_engine_event(udid, event_type, data)
+                except Exception:
+                    logger.debug("group sync: state hook failed", exc_info=True)
             if event_type == "position_update" and "lat" in data:
                 self.update_last_position(data["lat"], data["lng"])
                 self.connection_health.record_location_success(udid)
-            elif event_type == "state_change":
+                try:
+                    data = {**data, **self.group_sync.position_event_metadata(udid)}
+                except Exception:
+                    logger.debug("group sync: ACK metadata failed", exc_info=True)
+            await broadcast(event_type, data)
+            if event_type == "state_change":
                 state = data.get("state")
                 active = state not in (None, "idle", "disconnected")
                 previous = self.connection_health.get_device(udid) or {}
@@ -249,6 +287,14 @@ class AppState:
                     await broadcast("connection_health", health)
 
         engine = SimulationEngine(loc_service, event_callback)
+        # The callback is synchronous telemetry; SimulationEngine protects
+        # the write path if a future implementation makes it awaitable.
+        engine.position_ack_callback = (
+            lambda sequence, lat, lng, requested_at, acknowledged_at:
+            self.group_sync.record_position_ack(
+                udid, sequence, lat, lng, requested_at, acknowledged_at,
+            )
+        )
         self.simulation_engines[udid] = engine
         # Keep the existing primary on additional device connects. If no
         # primary is set (e.g. fresh install, first device), this udid
@@ -292,6 +338,17 @@ async def _auto_sync_new_device_to_primary(new_udid: str) -> None:
         sync happens; the user's next action will fan-out to both
     """
     import asyncio
+    # During a strict group recovery the coordinator owns the rejoin order:
+    # wait for the complete membership, align the returning engine to the
+    # surviving primary, then resume the route for everyone together.  Do not
+    # let the legacy one-device auto-sync path resume a route early.
+    group_sync = getattr(app_state, "group_sync", None)
+    if group_sync is not None:
+        try:
+            if await group_sync.member_reconnected(new_udid):
+                return
+        except Exception:
+            logger.exception("Group sync rejoin hook failed for %s", new_udid)
     primary_udid = app_state._primary_udid
     if primary_udid is None or primary_udid == new_udid:
         return
@@ -340,7 +397,11 @@ async def _auto_sync_new_device_to_primary(new_udid: str) -> None:
         return
 
     logger.info("Auto-sync: attaching %s as position-follower of primary %s", new_udid, primary_udid)
-    asyncio.create_task(_follow_primary_positions(new_udid, primary_udid))
+    starter = getattr(app_state, "_start_group_follower", None)
+    if callable(starter):
+        starter(new_udid, primary_udid)
+    else:
+        asyncio.create_task(_follow_primary_positions(new_udid, primary_udid))
 
 
 async def _follow_primary_positions(follower_udid: str, primary_udid: str) -> None:
@@ -349,6 +410,7 @@ async def _follow_primary_positions(follower_udid: str, primary_udid: str) -> No
     the follower starts its own simulation (which sets _stop_event via
     _ensure_stopped), or the primary engine is gone."""
     import asyncio
+    from models.schemas import SimulationState
     poll_interval = 0.5  # 500ms — primary's own updates run ~1 Hz, so this oversamples slightly without thrashing
     last_pushed_lat: float | None = None
     last_pushed_lng: float | None = None
@@ -370,6 +432,21 @@ async def _follow_primary_positions(follower_udid: str, primary_udid: str) -> No
         if primary_eng is None:
             logger.info("Follower %s: primary engine gone, stopping follow", follower_udid)
             return
+        if getattr(primary_eng, "state", None) not in {
+            _state for _state in (
+                SimulationState.NAVIGATING,
+                SimulationState.LOOPING,
+                SimulationState.MULTI_STOP,
+                SimulationState.RANDOM_WALK,
+                SimulationState.PAUSED,
+            )
+        }:
+            logger.info(
+                "Follower %s: primary %s is no longer in a group route, stopping follow",
+                follower_udid,
+                primary_udid,
+            )
+            return
 
         pos = primary_eng.current_position
         if pos is not None and (pos.lat != last_pushed_lat or pos.lng != last_pushed_lng):
@@ -379,6 +456,31 @@ async def _follow_primary_positions(follower_udid: str, primary_udid: str) -> No
             except Exception:
                 logger.debug("Follower %s: _set_position failed", follower_udid, exc_info=True)
         await asyncio.sleep(poll_interval)
+
+
+def _start_group_follower(follower_udid: str, primary_udid: str):
+    """Create a strongly-referenced follower task for group recovery.
+
+    ``asyncio`` keeps only weak references to background tasks.  Retaining the
+    task here also gives the coordinator a single callback that works for
+    normal auto-sync and recovery re-attachment alike.
+    """
+    task = asyncio.create_task(_follow_primary_positions(follower_udid, primary_udid))
+    task_set = getattr(app_state, "_group_follower_tasks", None)
+    if task_set is None:
+        task_set = set()
+        app_state._group_follower_tasks = task_set
+    task_set.add(task)
+
+    def _discard(done_task):
+        task_set.discard(done_task)
+
+    task.add_done_callback(_discard)
+    return task
+
+
+app_state._start_group_follower = _start_group_follower
+app_state.group_sync.set_follower_starter(_start_group_follower)
 
 
 async def _usbmux_presence_watchdog():
@@ -665,7 +767,15 @@ async def _usbmux_presence_watchdog():
                 # followers of the new leader (their old follower task,
                 # if any, self-terminates on _primary_udid change).
                 new_leader = app_state._primary_udid
-                if leader_lost and new_leader and handoff_snapshot:
+                # A strict multi-device recovery deliberately keeps every
+                # survivor paused until the missing member returns.  The old
+                # single-device promotion path would resume the follower
+                # immediately here, violating that invariant; the group
+                # coordinator performs the handoff once the group is whole.
+                group_recovery_active = bool(
+                    getattr(getattr(app_state, "group_sync", None), "is_recovering", False)
+                )
+                if leader_lost and new_leader and handoff_snapshot and not group_recovery_active:
                     new_leader_eng = app_state.simulation_engines.get(new_leader)
                     if new_leader_eng is not None:
                         # The new leader was a follower of the old leader
@@ -951,7 +1061,7 @@ async def lifespan(application: FastAPI):
 
 # ── FastAPI app ───────────────────────────────────────────
 
-APP_VERSION = "0.2.193-kx.13"
+APP_VERSION = "0.2.193-kx.15"
 
 app = FastAPI(title="LocWarp", version=APP_VERSION, description="iOS Virtual Location Simulator", lifespan=lifespan)
 

@@ -1,6 +1,7 @@
 import asyncio
 import unittest
-from unittest.mock import AsyncMock, patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from fastapi import HTTPException
 
@@ -65,6 +66,12 @@ class WifiPortCandidateTests(unittest.TestCase):
         )
 
         self.assertEqual(_build_tunnel_port_candidates(request), [57000])
+
+    def test_only_explicit_unreachable_transport_errors_skip_rescan(self):
+        self.assertTrue(device_api._is_host_unreachable_error(OSError(64, "Host is down")))
+        self.assertTrue(device_api._is_host_unreachable_error(RuntimeError("No route to host")))
+        self.assertFalse(device_api._is_host_unreachable_error(RuntimeError("RemotePairing identity mismatch")))
+        self.assertFalse(device_api._is_host_unreachable_error(asyncio.TimeoutError()))
 
     def test_explicit_udid_is_strict_and_does_not_try_other_pair_records(self):
         """A pinned identity must never be silently replaced after an IP rebind."""
@@ -145,6 +152,49 @@ class WifiPortFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([port for _, port, _ in _FakeRunner.attempts], [51000, 53000])
         scan.assert_awaited_once_with("192.0.2.10")
 
+    async def test_discovery_endpoint_failure_skips_redundant_full_rescan(self):
+        _FakeRunner.timeout_ports = {51000}
+        scan = AsyncMock(return_value=[53000])
+        request = WifiTunnelStartRequest(
+            ip="192.0.2.10",
+            port=51000,
+            udid="phone",
+            rescan=False,
+        )
+
+        with (
+            patch.object(device_api, "TunnelRunner", _FakeRunner),
+            patch.object(device_api, "_scan_ports_for_ip", scan),
+        ):
+            with self.assertRaises(HTTPException):
+                await wifi_tunnel_start(request)
+
+        scan.assert_not_awaited()
+
+    async def test_partial_mdns_result_is_augmented_for_second_phone(self):
+        mdns_phone = SimpleNamespace(
+            addresses=["192.168.1.116"],
+            port=50268,
+            host="nokia.local",
+            instance="nokia",
+        )
+        subnet_scan = AsyncMock(side_effect=[["192.168.1.102"], []])
+        port_scan = AsyncMock(return_value=[49152])
+
+        with (
+            patch("pymobiledevice3.bonjour.browse_remotepairing", new=AsyncMock(return_value=[mdns_phone])),
+            patch.object(device_api, "_get_primary_local_ip", return_value="192.168.1.125"),
+            patch.object(device_api, "_scan_subnet_for_port", subnet_scan),
+            patch.object(device_api, "_scan_ports_for_ip", port_scan),
+        ):
+            result = await device_api._wifi_tunnel_discover_impl()
+
+        self.assertEqual(
+            {(item["ip"], item["port"]) for item in result["devices"]},
+            {("192.168.1.116", 50268), ("192.168.1.102", 49152)},
+        )
+        port_scan.assert_awaited_once_with("192.168.1.102", stop_after_hits=8)
+
     async def test_manual_port_scan_drops_known_lockdownd_port(self):
         scan = AsyncMock(return_value=[62078, 54000])
 
@@ -175,6 +225,56 @@ class WifiPortFlowTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(hits, [3, 17])
         self.assertLessEqual(maximum, 4)
+
+    async def test_discovery_port_scan_stops_after_first_hit_batch(self):
+        probed = []
+
+        async def probe(_ip, port, _timeout):
+            probed.append(port)
+            return port in {3, 4, 17}
+
+        with patch.object(device_api, "_tcp_probe", side_effect=probe):
+            hits = await device_api._scan_ports_for_ip(
+                "192.0.2.10",
+                start=1,
+                end=20,
+                concurrency=4,
+                stop_after_hits=2,
+            )
+
+        self.assertEqual(hits, [3, 4])
+        self.assertEqual(probed, [1, 2, 3, 4])
+
+    async def test_tcp_probe_closes_owned_socket_after_timeout(self):
+        sock = MagicMock()
+
+        async def never_connect(*_args, **_kwargs):
+            await asyncio.sleep(60)
+
+        loop = asyncio.get_running_loop()
+        with (
+            patch("socket.socket", return_value=sock),
+            patch.object(loop, "sock_connect", side_effect=never_connect),
+        ):
+            connected = await device_api._tcp_probe("192.0.2.10", 49152, timeout=0.001)
+
+        self.assertFalse(connected)
+        sock.setblocking.assert_called_once_with(False)
+        sock.close.assert_called_once_with()
+
+    async def test_discovery_is_server_bounded_and_releases_shared_task(self):
+        async def never_finishes():
+            await asyncio.sleep(60)
+
+        device_api._wifi_discovery_task = None
+        with (
+            patch.object(device_api, "_wifi_tunnel_discover_impl", side_effect=never_finishes),
+            patch.object(device_api, "WIFI_DISCOVERY_BUDGET", 0.001),
+        ):
+            result = await device_api.wifi_tunnel_discover()
+
+        self.assertEqual(result, {"devices": []})
+        self.assertTrue(device_api._wifi_discovery_task.done())
 
     async def test_different_devices_handshake_in_parallel_and_publish_canonical_ids(self):
         class ParallelRunner(_FakeRunner):

@@ -4,6 +4,12 @@ const DESKTOP_TOKEN = desktopApiConfig?.token || ''
 
 export const getDesktopApiToken = () => DESKTOP_TOKEN
 
+export interface ApiError extends Error {
+  code?: string
+  status?: number
+  detail?: unknown
+}
+
 function authenticatedHeaders(headers?: HeadersInit): Headers {
   const result = new Headers(headers)
   if (DESKTOP_TOKEN) result.set('X-LocWarp-Desktop-Token', DESKTOP_TOKEN)
@@ -12,15 +18,46 @@ function authenticatedHeaders(headers?: HeadersInit): Headers {
 
 // Connection-refused means backend isn't up yet, retry with backoff.
 // Other HTTP errors (4xx/5xx) are real errors and propagate immediately.
+function abortError(): Error {
+  const error = new Error('The operation was aborted')
+  error.name = 'AbortError'
+  return error
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw abortError()
+}
+
+function waitBeforeRetry(ms: number, signal?: AbortSignal): Promise<void> {
+  throwIfAborted(signal)
+  return new Promise((resolve, reject) => {
+    const timer = globalThis.setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort)
+      resolve()
+    }, ms)
+    const onAbort = () => {
+      globalThis.clearTimeout(timer)
+      signal?.removeEventListener('abort', onAbort)
+      reject(abortError())
+    }
+    signal?.addEventListener('abort', onAbort, { once: true })
+  })
+}
+
+// Connection-refused means backend isn't up yet, retry with backoff. An
+// aborted request is different: it belongs to an old network epoch and must
+// stop immediately rather than queueing another stale scan.
 async function fetchWithRetry(url: string, opts: RequestInit, maxAttempts = 15): Promise<Response> {
   let lastErr: unknown
   for (let i = 0; i < maxAttempts; i++) {
     try {
+      throwIfAborted(opts.signal ?? undefined)
       return await fetch(url, opts)
     } catch (e) {
+      if (opts.signal?.aborted || (e as { name?: string })?.name === 'AbortError') throw e
       lastErr = e
       const delay = Math.min(500 + i * 300, 2000)
-      await new Promise((r) => setTimeout(r, delay))
+      await waitBeforeRetry(delay, opts.signal ?? undefined)
     }
   }
   throw lastErr ?? new Error('fetch failed')
@@ -110,35 +147,44 @@ function formatError(detail: unknown, fallback: string): string {
   return maybeAttachDevModeHint(fallback)
 }
 
-async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
+async function request<T>(method: string, path: string, body?: unknown, options?: { signal?: AbortSignal }): Promise<T> {
   const opts: RequestInit = {
     method,
     headers: authenticatedHeaders({ 'Content-Type': 'application/json' }),
+    signal: options?.signal,
   }
   if (body !== undefined) opts.body = JSON.stringify(body)
   const res = await fetchWithRetry(`${API}${path}`, opts)
   if (!res.ok) {
-    const err = await res.json().catch(() => ({ detail: res.statusText }))
-    throw new Error(formatError(err.detail, res.statusText))
+    const err = await res.json().catch(() => ({ detail: res.statusText })) as { detail?: unknown }
+    const failure = new Error(formatError(err.detail, res.statusText)) as ApiError
+    const detail = err?.detail
+    if (detail && typeof detail === 'object' && typeof (detail as { code?: unknown }).code === 'string') {
+      failure.code = String((detail as { code: string }).code)
+    }
+    failure.status = res.status
+    failure.detail = detail
+    throw failure
   }
   return res.json()
 }
 
 // Device
-export const listDevices = () => request<any[]>('GET', '/api/device/list')
+export const listDevices = (signal?: AbortSignal) => request<any[]>('GET', '/api/device/list', undefined, { signal })
 export const connectDevice = (udid: string) => request<any>('POST', `/api/device/${udid}/connect`)
 export const disconnectDevice = (udid: string) => request<any>('DELETE', `/api/device/${udid}/connect`)
 export const mountPersonalizedDdi = (udid: string) => request<any>('POST', `/api/device/${encodeURIComponent(udid)}/ddi/mount`)
 export const wifiConnect = (ip: string) => request<any>('POST', '/api/device/wifi/connect', { ip })
-export const wifiScan = () => request<any[]>('GET', '/api/device/wifi/scan')
+export const wifiScan = (signal?: AbortSignal) => request<any[]>('GET', '/api/device/wifi/scan', undefined, { signal })
 // ports: extra RemotePairing port candidates the backend walks if `port` is
 // stale. iOS re-picks the port on every boot, so a remembered one often is.
-export const wifiTunnelStartAndConnect = (ip: string, port = 49152, udid?: string, ports?: number[]) =>
+export const wifiTunnelStartAndConnect = (ip: string, port = 49152, udid?: string, ports?: number[], signal?: AbortSignal, rescan = true) =>
   request<any>('POST', '/api/device/wifi/tunnel/start-and-connect', {
     ip, port,
     ...(udid ? { udid } : {}),
     ...(ports && ports.length ? { ports } : {}),
-  })
+    rescan,
+  }, { signal })
 export interface TunnelInfo {
   udid: string
   rsd_address?: string
@@ -176,7 +222,7 @@ export interface ConnectionHealth {
 }
 export const getConnectionDiagnostics = () =>
   request<{ devices: ConnectionHealth[]; usb_flapping: boolean }>('GET', '/api/diagnostics/connection')
-export const wifiTunnelStatus = () =>
+export const wifiTunnelStatus = (signal?: AbortSignal) =>
   request<{
     tunnels: TunnelInfo[]
     running: boolean
@@ -184,13 +230,22 @@ export const wifiTunnelStatus = () =>
     rsd_port?: number
     max_devices?: number
   }>(
-    'GET', '/api/device/wifi/tunnel/status',
+    'GET', '/api/device/wifi/tunnel/status', undefined, { signal },
   )
-export const wifiTunnelDiscover = () => request<{
-  devices: { ip: string; port: number; ports?: number[]; host: string; name: string; udid?: string }[]
-}>('GET', '/api/device/wifi/tunnel/discover')
-export const wifiTunnelFindPort = (ip: string) =>
-  request<{ ip: string; ports: number[] }>('POST', '/api/device/wifi/tunnel/find_port', { ip })
+export const wifiTunnelDiscover = (signal?: AbortSignal) => request<{
+  devices: {
+    ip: string
+    port: number
+    ports?: number[]
+    host: string
+    name: string
+    udid?: string
+    reachable?: boolean
+    unreachable?: boolean
+  }[]
+}>('GET', '/api/device/wifi/tunnel/discover', undefined, { signal })
+export const wifiTunnelFindPort = (ip: string, signal?: AbortSignal) =>
+  request<{ ip: string; ports: number[] }>('POST', '/api/device/wifi/tunnel/find_port', { ip }, { signal })
 // udid: stop one specific tunnel; omit to stop all (legacy stop-all)
 export const wifiTunnelStop = (udid?: string) =>
   request<{ status: string; udid?: string; udids?: string[] }>(

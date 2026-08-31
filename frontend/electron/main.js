@@ -5,6 +5,7 @@ const { spawn, execFile } = require('child_process')
 const http = require('http')
 const os = require('os')
 const crypto = require('crypto')
+const { buildNetworkContext } = require('./network-context')
 
 // Render-mode preference (Issue #24). Win 10 stays on software rendering
 // by default — v0.2.121/125 hit a Chromium 124 GPU-sandbox crash on
@@ -225,6 +226,44 @@ Menu.setApplicationMenu(Menu.buildFromTemplate([
 ]))
 
 let mainWindow
+let networkContext = null
+let networkContextTimer = null
+
+const defaultInterfaceName = () => new Promise((resolve) => {
+  if (process.platform !== 'darwin') return resolve(null)
+  execFile('/sbin/route', ['-n', 'get', 'default'], { timeout: 1500 }, (error, stdout) => {
+    if (error) return resolve(null)
+    const match = String(stdout || '').match(/^\s*interface:\s*(\S+)/m)
+    resolve(match ? match[1] : null)
+  })
+})
+
+async function readNetworkContext() {
+  const preferredName = await defaultInterfaceName()
+  return buildNetworkContext(os.networkInterfaces(), preferredName, networkContext)
+}
+
+async function refreshNetworkContext({ notify = true } = {}) {
+  const next = await readNetworkContext()
+  const changed = networkContext !== null && networkContext.signature !== next.signature
+  networkContext = next
+  if (changed && notify && mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('network-context-changed', next)
+  }
+  return next
+}
+
+function startNetworkContextMonitor() {
+  if (networkContextTimer) return
+  void refreshNetworkContext({ notify: false })
+  networkContextTimer = setInterval(() => { void refreshNetworkContext() }, 2000)
+  networkContextTimer.unref?.()
+}
+
+function stopNetworkContextMonitor() {
+  if (networkContextTimer) clearInterval(networkContextTimer)
+  networkContextTimer = null
+}
 let backendProc = null
 const BACKEND_PORT = 8777
 const desktopApiToken = crypto.randomBytes(32).toString('hex')
@@ -709,6 +748,8 @@ ipcMain.on('get-desktop-api-config', (event) => {
   }
 })
 
+ipcMain.handle('get-network-context', () => refreshNetworkContext({ notify: false }))
+
 const backendRuntimeDir = () => path.join(app.getPath('userData'), 'backend-runtime')
 const backendPidFile = () => path.join(backendRuntimeDir(), 'backend.pid')
 
@@ -1152,7 +1193,10 @@ async function createWindow() {
   }
 }
 
-app.whenReady().then(createWindow)
+app.whenReady().then(async () => {
+  await createWindow()
+  startNetworkContextMonitor()
+})
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
     void stopBackend()
@@ -1160,6 +1204,7 @@ app.on('window-all-closed', () => {
   }
 })
 app.on('before-quit', (event) => {
+  stopNetworkContextMonitor()
   if (gpsWatchProc) {
     try { gpsWatchProc.kill('SIGKILL') } catch {}
     clearGpsWatchProcessState()

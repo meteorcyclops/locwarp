@@ -9,26 +9,37 @@ const gpsSource = fs.readFileSync(path.join(__dirname, '../src/components/GpsWat
 const statusSource = fs.readFileSync(path.join(__dirname, '../src/components/DeviceStatus.tsx'), 'utf8');
 const apiSource = fs.readFileSync(path.join(__dirname, '../src/services/api.ts'), 'utf8');
 
-test('Wi-Fi auto-connect skips only occupied devices and uses backend capacity', () => {
-  assert.match(appSource, /api\.listDevices\(\)\.catch/);
-  assert.match(appSource, /alreadyTunneledUdids/);
-  assert.match(appSource, /status\s+as any\)\?\.max_devices/);
-  assert.match(appSource, /const limited = uniq\.slice\(0, availableSlots\)/);
-  assert.match(appSource, /Promise\.allSettled\(\s*limited\.map/);
+test('Wi-Fi auto-connect reuses the hook pipeline with capacity and epoch guards', () => {
+  assert.match(appSource, /device\.autoConnectWifi\(\)/);
+  assert.match(appSource, /if \(!ws\.connected\) \{[\s\S]*wifiAutoConnectAttemptedRef\.current = false/);
+  assert.doesNotMatch(appSource, /api\.wifiTunnelDiscover\(\)/);
+  assert.match(deviceSource, /Promise\.allSettled\(\[\s*wifiTunnelStatus/);
+  assert.match(deviceSource, /const availableSlots = Math\.max\(0, maxDevices - occupiedUdids\.size\)/);
+  assert.match(deviceSource, /buildWifiReconnectEndpoints\(/);
+  assert.match(deviceSource, /Promise\.allSettled\(selectedGroups\.map/);
   assert.doesNotMatch(appSource, /if \(device\.connectedDevices\.length > 0\) return/);
 });
 
 test('pinned Wi-Fi reconnect falls back from stale saved IP to UDID-verified discovery', () => {
-  assert.match(appSource, /const uniquePinnedUdids = Array\.from\(new Set\(pinnedUdids\)\)/);
-  assert.match(appSource, /const savedByUdid = new Map/);
-  assert.match(appSource, /for \(const endpoint of endpoints\)/);
-  assert.match(appSource, /startWifiTunnel\(endpoint\.ip, endpoint\.port, udid, endpoint\.ports\)/);
-  assert.match(appSource, /candidate\.udid && candidate\.udid !== udid/);
-  assert.match(appSource, /Saved IP may be stale; continue with the next/);
+  assert.match(deviceSource, /const SAVED_ENDPOINT_TIMEOUT_MS = 30_000/);
+  assert.match(deviceSource, /const DISCOVERY_TIMEOUT_MS = 22_000/);
+  assert.match(deviceSource, /const TUNNEL_HANDSHAKE_TIMEOUT_MS = 30_000/);
+  assert.match(deviceSource, /const saved = readSavedEntryFor\(udid\)/);
+  assert.match(deviceSource, /tryEndpoint\(saved, 'last_ip', SAVED_ENDPOINT_TIMEOUT_MS\)/);
+  assert.match(deviceSource, /updateWifiReconnect\(key, 'network_changed_discovery'/);
+  assert.match(deviceSource, /for \(const endpoint of endpoints\)/);
+  assert.match(deviceSource, /request\.controller\.signal/);
+  assert.match(deviceSource, /const epochCurrent = \(\) =>/);
+  assert.match(deviceSource, /if \(!epochCurrent\(\) \|\| request\.controller\.signal\.aborted\) return 'stale'/);
   assert.match(deviceSource, /wifiTunnelDiscover/);
+  assert.match(deviceSource, /tryEndpoint\(endpoint, 'tunnel', TUNNEL_HANDSHAKE_TIMEOUT_MS\)/);
+  assert.match(deviceSource, /stage !== 'tunnel'/);
+  assert.match(apiSource, /rescan = true/);
   assert.match(deviceSource, /pinReconnectInFlightRef/);
-  assert.match(deviceSource, /startWifiTunnelRef\.current\(endpoint\.ip, endpoint\.port, udid, endpoint\.ports\)/);
-  assert.match(deviceSource, /UDID-hinted handshake below verifies the peer/);
+  assert.match(deviceSource, /startWifiTunnelRef\.current\(/);
+  assert.match(deviceSource, /isPairingInvalidError\(error\)/);
+  assert.match(deviceSource, /shouldPersistWifiEndpoint/);
+  assert.match(deviceSource, /Backend startup can restore a device before the renderer subscribes/);
 });
 
 test('GPS Watch exposes strict all-device target mode and group fan-out', () => {
@@ -55,4 +66,11 @@ test('tunnel UI accepts backend capacity while retaining the legacy macOS fallba
   assert.match(statusSource, /maxTunnelDevices\?: number/);
   assert.match(statusSource, /PRODUCT_MAX_TUNNEL_DEVICES/);
   assert.doesNotMatch(statusSource, /window\.electronAPI\?\.platform === 'darwin' \? 1 : 3;[\s\S]{0,300}Math\.min\(DEFAULT_MAX_TUNNEL_DEVICES/);
+});
+
+test('connection page de-duplicates tunnel and pin identity case-insensitively', () => {
+  assert.match(statusSource, /canonicalUdid\(tn\.udid\) !== canonicalUdid\(device\?\.id\)/);
+  assert.match(statusSource, /const isPinnedUdid =/);
+  assert.doesNotMatch(statusSource, /pinnedUdids\.includes\(/);
+  assert.doesNotMatch(statusSource, /tn\.udid !== device\?\.id/);
 });

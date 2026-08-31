@@ -25,6 +25,15 @@ export interface DesktopApiConfig {
   token: string
 }
 
+export interface NetworkContext {
+  signature: string
+  interfaceName: string | null
+  ipv4: string | null
+  cidr: number | null
+  subnet: string | null
+  changedAt: number
+}
+
 export interface GpsWatchRegion {
   displayId: number
   displayBounds: { x: number; y: number; width: number; height: number }
@@ -64,6 +73,8 @@ declare global {
       relaunchApp(): Promise<void>
       restartBackend(): Promise<RestartBackendResult>
       getDesktopApiConfig(): DesktopApiConfig
+      getNetworkContext?(): Promise<NetworkContext>
+      onNetworkContextChanged?(callback: (context: NetworkContext) => void): () => void
       gpsWatch?: {
         selectRegion(): Promise<{ ok: boolean; code?: string; region?: GpsWatchRegion }>
         start(region: GpsWatchRegion): Promise<{ ok: boolean; code?: string; state?: string; helper?: string }>

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import time
 from datetime import datetime, timedelta, timezone
@@ -170,6 +171,15 @@ class SimulationEngine:
         # disconnect-promotion can capture it and restore on the new
         # leader. The handler increments this after each completed leg.
         self._random_walk_count: int = 0
+        # Location-write telemetry.  ``LocationService.set`` returning is the
+        # backend ACK boundary; the group coordinator uses these values to
+        # report per-device write latency and inter-device ACK skew without
+        # changing the public SimulationStatus schema.
+        self._position_sequence: int = 0
+        self._last_position_request_monotonic: float | None = None
+        self._last_position_ack_monotonic: float | None = None
+        self._last_position_ack_latency_ms: float | None = None
+        self.position_ack_callback = None
         # Holds the live-insert-waypoint splice/resume task so the
         # event loop's weak-reference task tracking doesn't garbage
         # collect it mid-execution. Cleared by the task itself when it
@@ -579,20 +589,26 @@ class SimulationEngine:
         self._last_route_path = None
         logger.info("Simulation stopped")
 
-    def capture_resumable_snapshot(self) -> dict | None:
+    def capture_resumable_snapshot(self, *, allow_disconnected: bool = False) -> dict | None:
         """Snapshot enough state for another engine to continue this
         sim from the current position. Used by the watchdog when the
         primary device disconnects and a follower needs to be promoted
         to leader without restarting the simulation from scratch.
 
         Returns None when there's nothing meaningful to resume (idle,
-        joystick, paused, etc).
+        joystick, paused, etc).  ``allow_disconnected`` is used only by the
+        strict multi-device coordinator after a transport watchdog has marked
+        this engine disconnected but before its last route state is removed.
+        The normal callers keep the dynamic-state guard.
         """
-        if self.state not in (
+        resumable_states = (
             SimulationState.NAVIGATING,
             SimulationState.LOOPING,
             SimulationState.MULTI_STOP,
             SimulationState.RANDOM_WALK,
+        )
+        if self.state not in resumable_states and not (
+            allow_disconnected and self.state == SimulationState.DISCONNECTED
         ):
             return None
         if not self._last_sim_kind or not self._last_sim_args:
@@ -704,7 +720,31 @@ class SimulationEngine:
 
     async def _set_position(self, lat: float, lng: float) -> None:
         """Push a coordinate to the device and update internal state."""
+        requested_at = time.monotonic()
+        self._last_position_request_monotonic = requested_at
         await self.location_service.set(lat, lng)
+        acknowledged_at = time.monotonic()
+        self._position_sequence += 1
+        self._last_position_ack_monotonic = acknowledged_at
+        self._last_position_ack_latency_ms = max(
+            0.0, (acknowledged_at - requested_at) * 1000.0
+        )
+        callback = self.position_ack_callback
+        if callback is not None:
+            try:
+                result = callback(
+                    self._position_sequence,
+                    float(lat),
+                    float(lng),
+                    requested_at,
+                    acknowledged_at,
+                )
+                if inspect.isawaitable(result):
+                    await result
+            except Exception:
+                # Telemetry must never turn a successful location write into
+                # a simulation failure.  The coordinator is observational.
+                logger.debug("Position ACK telemetry callback failed", exc_info=True)
         self.current_position = Coordinate(lat=lat, lng=lng)
 
     def apply_speed(

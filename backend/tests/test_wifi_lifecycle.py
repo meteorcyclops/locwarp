@@ -174,6 +174,58 @@ class WifiLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(maximum, 1)
         self.assertEqual([item["udid"] for item in results], ["phone-a"] * 3)
 
+    async def test_explicit_wifi_connect_auto_syncs_fresh_device_to_primary(self):
+        runner = SimpleNamespace(
+            rsd=object(),
+            is_running=lambda: True,
+        )
+        device_api._tunnels["phone-b"] = runner
+        info = SimpleNamespace(
+            udid="phone-b",
+            name="Phone B",
+            ios_version="18.0",
+        )
+        manager = SimpleNamespace(
+            _connections={},
+            connect_wifi_tunnel=AsyncMock(return_value=info),
+        )
+        auto_sync = AsyncMock()
+        app_state = SimpleNamespace(
+            simulation_engines={"phone-a": object()},
+            _primary_udid="phone-a",
+            create_engine_for_device=AsyncMock(),
+        )
+        start_result = {
+            "status": "started",
+            "udid": "phone-b",
+            "port": 54321,
+            "rsd_address": "fd00::2",
+            "rsd_port": 12346,
+        }
+        req = device_api.WifiTunnelStartRequest(
+            ip="192.0.2.42",
+            port=54321,
+            udid="phone-b",
+        )
+
+        with (
+            patch.object(device_api, "_wifi_tunnel_start_impl", AsyncMock(return_value=start_result)),
+            patch.object(device_api, "_dm", return_value=manager),
+            patch("api.websocket.broadcast", new_callable=AsyncMock),
+            patch.dict(
+                sys.modules,
+                {"main": SimpleNamespace(
+                    app_state=app_state,
+                    _auto_sync_new_device_to_primary=auto_sync,
+                )},
+            ),
+        ):
+            result = await device_api._wifi_tunnel_start_and_connect_impl(req, "phone-b")
+
+        self.assertEqual(result["status"], "connected")
+        app_state.create_engine_for_device.assert_awaited_once_with("phone-b")
+        auto_sync.assert_awaited_once_with("phone-b")
+
     async def test_cancel_after_publish_removes_owned_worker_and_watchdog(self):
         publish_reached = asyncio.Event()
 
