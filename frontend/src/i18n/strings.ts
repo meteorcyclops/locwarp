@@ -643,6 +643,7 @@ export const STRINGS = {
   'diagnostics.healthy': { zh: '運作正常', en: 'Healthy' },
   'diagnostics.attention': { zh: '需要注意', en: 'Needs attention' },
   'diagnostics.unavailable': { zh: '無法取得', en: 'Unavailable' },
+  'diagnostics.timeout': { zh: '暫時無法驗證（Wi‑Fi 掃描忙碌），將自動重試', en: 'Temporarily unavailable while Wi-Fi scanning is busy; retrying automatically' },
   'diagnostics.checking': { zh: '檢查中…', en: 'Checking…' },
   'diagnostics.refresh': { zh: '重新檢查', en: 'Refresh' },
   'diagnostics.backend_health': { zh: 'Backend API', en: 'Backend API' },

@@ -4,6 +4,7 @@ import { useT } from '../i18n'
 import { BRAND } from '../config/brand'
 
 type CaptureDiagnostic = { supported: boolean; state: string } | null
+const DIAGNOSTICS_TIMEOUT_MS = 4_000
 
 const valueOrUnknown = (value: string | number | null | undefined): string =>
   value === null || value === undefined || value === '' ? '—' : String(value)
@@ -30,21 +31,26 @@ const SystemDiagnosticsPanel: React.FC = () => {
   const runtime = window.electronAPI?.runtimeVersions
 
   const refresh = useCallback(async () => {
+    const controller = new AbortController()
+    const timeout = window.setTimeout(() => controller.abort(), DIAGNOSTICS_TIMEOUT_MS)
     setLoading(true)
     try {
       const [system, gpsWatch] = await Promise.all([
-        getSystemDiagnostics(),
+        getSystemDiagnostics(controller.signal),
         window.electronAPI?.gpsWatch?.status().catch(() => null) ?? Promise.resolve(null),
       ])
       setDiagnostics(system)
       setCapture(gpsWatch ? { supported: gpsWatch.supported, state: gpsWatch.state } : null)
       setError(null)
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason))
+      setError(reason instanceof Error && reason.name === 'AbortError'
+        ? t('diagnostics.timeout')
+        : reason instanceof Error ? reason.message : String(reason))
     } finally {
+      window.clearTimeout(timeout)
       setLoading(false)
     }
-  }, [])
+  }, [t])
 
   useEffect(() => {
     let active = true

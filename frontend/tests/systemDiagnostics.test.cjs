@@ -10,9 +10,11 @@ test('settings diagnostics uses the authenticated backend contract and real runt
   const panel = read('src/components/SystemDiagnosticsPanel.tsx')
   const preload = read('electron/preload.js')
 
-  assert.match(api, /request<SystemDiagnostics>\('GET', '\/api\/diagnostics\/system', undefined, \{ maxAttempts: 1 \}\)/)
+  assert.match(api, /request<SystemDiagnostics>\('GET', '\/api\/diagnostics\/system', undefined, \{ maxAttempts: 1, signal \}\)/)
   assert.match(preload, /runtimeVersions:[\s\S]*process\.versions\.electron[\s\S]*process\.versions\.chrome[\s\S]*process\.versions\.node/)
-  assert.match(panel, /getSystemDiagnostics\(\)/)
+  assert.match(panel, /getSystemDiagnostics\(controller\.signal\)/)
+  assert.match(panel, /DIAGNOSTICS_TIMEOUT_MS = 4_000/)
+  assert.match(panel, /controller\.abort\(\)/)
   assert.match(panel, /window\.electronAPI\?\.gpsWatch\?\.status\(\)/)
 })
 

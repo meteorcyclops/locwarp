@@ -260,8 +260,8 @@ export interface SystemDiagnostics {
   } | null
   checked_at_unix: number
 }
-export const getSystemDiagnostics = () =>
-  request<SystemDiagnostics>('GET', '/api/diagnostics/system', undefined, { maxAttempts: 1 })
+export const getSystemDiagnostics = (signal?: AbortSignal) =>
+  request<SystemDiagnostics>('GET', '/api/diagnostics/system', undefined, { maxAttempts: 1, signal })
 export const wifiTunnelStatus = (signal?: AbortSignal) =>
   request<{
     tunnels: TunnelInfo[]
