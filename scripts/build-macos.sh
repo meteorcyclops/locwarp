@@ -114,19 +114,39 @@ codesign --force \
   "$helper_output_dir/locwarp-ocr-helper"
 codesign --verify --strict "$helper_output_dir/locwarp-ocr-helper"
 
-python3 -m venv "$venv_dir"
+# Recreate the build environment from the bounded requirements on every
+# package build. Reusing an old .venv can leave removed pymobiledevice3
+# transitive packages behind and make the frozen backend non-reproducible.
+python3 -m venv --clear "$venv_dir"
 "$venv_dir/bin/python" -m pip install -r "$repo_dir/backend/requirements.txt" "pyinstaller==6.21.0"
 
 "$venv_dir/bin/python" - <<'PY'
 import importlib.metadata
 import importlib.util
+from packaging.version import Version
 
-version = importlib.metadata.version("pymobiledevice3")
-if version != "10.3.0":
-    raise SystemExit(f"expected pymobiledevice3 10.3.0, got {version}")
-if importlib.util.find_spec("pymobiledevice3.remote.userspace_tunnel") is None:
-    raise SystemExit("pymobiledevice3 userspace_tunnel module is missing")
-print(f"Using pymobiledevice3 {version} with userspace tunnel support")
+pmd_version = Version(importlib.metadata.version("pymobiledevice3"))
+if pmd_version != Version("11.2.4"):
+    raise SystemExit(
+        "expected pymobiledevice3 11.2.4 for the kx.17 "
+        f"userspace API, got {pmd_version}"
+    )
+
+for module_name in (
+    "pymobiledevice3.remote.userspace_tunnel",
+    "pmd_pytcp",
+):
+    if importlib.util.find_spec(module_name) is None:
+        raise SystemExit(f"required userspace tunnel module is missing: {module_name}")
+
+pytcp_version = Version(importlib.metadata.version("pmd-pytcp"))
+if pytcp_version < Version("0.3.7"):
+    raise SystemExit(f"expected pmd-pytcp >=0.3.7, got {pytcp_version}")
+
+print(
+    "Using pymobiledevice3 "
+    f"{pmd_version} with pmd-pytcp {pytcp_version} userspace tunnel support"
+)
 PY
 
 (

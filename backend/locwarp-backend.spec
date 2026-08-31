@@ -10,6 +10,12 @@ pmd_datas, pmd_binaries, pmd_hiddenimports = collect_all('pymobiledevice3')
 # pytun_pmd3 ships wintun.dll as a data file that ctypes loads at runtime
 pytun_datas, pytun_binaries, pytun_hidden = collect_all('pytun_pmd3')
 
+# pymobiledevice3 11.2.x's root-free RemotePairing path uses pmd-pytcp for
+# the userspace TCP/IP stack. Its protocol handlers and native helpers are
+# resolved dynamically, so collect the complete package for the frozen WiFi
+# worker. This is required even though the source checkout imports cleanly.
+pytcp_datas, pytcp_binaries, pytcp_hidden = collect_all('pmd_pytcp')
+
 # developer_disk_image is an indirect dependency of pymobiledevice3 (imported
 # at the top of services/mobile_image_mounter.py). PyInstaller doesn't pick
 # it up via collect_all('pymobiledevice3'), so previously the bundled exe
@@ -49,6 +55,7 @@ ps_datas, ps_binaries, ps_hidden = collect_all('psutil')
 hidden = [
     *pmd_hiddenimports,
     *pytun_hidden,
+    *pytcp_hidden,
     *ddi_hidden,
     *pyimg4_hidden,
     *apple_compress_hidden,
@@ -83,9 +90,9 @@ hidden = [
 a = Analysis(
     ['main.py'],
     pathex=['.'],
-    binaries=[*pmd_binaries, *pytun_binaries, *ddi_binaries, *pyimg4_binaries,
+    binaries=[*pmd_binaries, *pytun_binaries, *pytcp_binaries, *ddi_binaries, *pyimg4_binaries,
               *apple_compress_binaries, *ps_binaries],
-    datas=[*pmd_datas, *pytun_datas, *ddi_datas, *pyimg4_datas, *pyimg4_meta,
+    datas=[*pmd_datas, *pytun_datas, *pytcp_datas, *ddi_datas, *pyimg4_datas, *pyimg4_meta,
            *apple_compress_datas, *apple_compress_meta, *ps_datas,
            ('static/phone.html', 'static')],
     hiddenimports=hidden,

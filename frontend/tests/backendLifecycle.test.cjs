@@ -18,6 +18,6 @@ test('stale packaged backend replacement also cleans its validated workers', () 
 });
 
 test('macOS native application menu preserves Command+Q cleanup', () => {
-  assert.match(mainSource, /process\.platform === 'darwin'[\s\S]{0,220}\{ role: 'appMenu' \}/);
+  assert.match(mainSource, /process\.platform === 'darwin'[\s\S]{0,620}\{ role: 'quit', accelerator: 'CommandOrControl\+Q' \}/);
   assert.match(mainSource, /app\.on\('before-quit',[\s\S]{0,520}await stopBackend|app\.on\('before-quit',[\s\S]{0,520}stopBackend\(\)/);
 });

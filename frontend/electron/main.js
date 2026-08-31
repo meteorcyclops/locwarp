@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, shell, ipcMain, dialog, screen, globalShortcut } = require('electron')
+const { app, BrowserWindow, Menu, shell, ipcMain, dialog, screen, globalShortcut, clipboard } = require('electron')
 const fs = require('fs')
 const path = require('path')
 const { spawn, execFile } = require('child_process')
@@ -185,6 +185,17 @@ ipcMain.handle('relaunch-app', () => {
   app.exit(0)
 })
 
+// Electron 44 keeps privileged Electron modules out of the isolated preload.
+// Route clipboard access through the main process while exposing only the two
+// narrow operations the renderer needs. This preserves Cmd/Ctrl+C/V and the
+// app's explicit paste/copy buttons without re-enabling nodeIntegration.
+ipcMain.handle('clipboard:readText', () => clipboard.readText())
+ipcMain.handle('clipboard:writeText', async (_event, text) => {
+  if (typeof text !== 'string') throw new TypeError('clipboard text must be a string')
+  await clipboard.writeText(text)
+  return { ok: true }
+})
+
 ipcMain.handle('locate-pc', async () => {
   const win = await tryWindowsLocation()
   if (win.ok) return { ...win, via: 'windows' }
@@ -226,7 +237,23 @@ const editMenu = {
 }
 const applicationMenuTemplate = process.platform === 'darwin'
   ? [
-      { role: 'appMenu' },
+      {
+        label: 'LocWarp',
+        submenu: [
+          { role: 'about' },
+          { type: 'separator' },
+          { role: 'services' },
+          { type: 'separator' },
+          { role: 'hide' },
+          { role: 'hideOthers' },
+          { role: 'unhide' },
+          { type: 'separator' },
+          // Electron 44's generated appMenu did not reliably expose its Quit
+          // accelerator in this packaged app. Bind it explicitly so the
+          // keyboard path and menu click share the same before-quit cleanup.
+          { role: 'quit', accelerator: 'CommandOrControl+Q' },
+        ],
+      },
       { role: 'fileMenu' },
       { role: 'editMenu' },
       { role: 'viewMenu' },

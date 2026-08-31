@@ -32,7 +32,7 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
-def _backup_corrupt(path: Path, reason: str) -> None:
+def _backup_corrupt(path: Path, reason: str) -> Path | None:
     """Copy the current file contents to ``<name>.bak-<UTC timestamp>``.
 
     Best-effort: if the backup itself fails (disk full, permission
@@ -45,14 +45,28 @@ def _backup_corrupt(path: Path, reason: str) -> None:
         backup = path.with_suffix(path.suffix + f".bak-{ts}")
         backup.write_bytes(path.read_bytes())
         logger.error(
-            "failed to read %s (%s); backed up corrupt file to %s and starting empty",
+            "failed to load %s (%s); backed up invalid file to %s and starting empty",
             path.name, reason, backup.name,
         )
+        return backup
     except Exception:
         logger.error(
-            "failed to read %s (%s) AND could not back it up; starting empty",
+            "failed to load %s (%s) AND could not back it up; starting empty",
             path.name, reason,
         )
+        return None
+
+
+def backup_invalid_json(path: Path, reason: str) -> Path | None:
+    """Preserve JSON that parsed successfully but failed caller validation.
+
+    ``safe_load_json`` can only detect syntax/read failures. Domain models may
+    still reject a syntactically valid payload, and that file needs the same
+    protection before a later CRUD operation writes a default store over it.
+    """
+    if not path.exists():
+        return None
+    return _backup_corrupt(path, reason)
 
 
 def safe_load_json(path: Path) -> Any:

@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useEffect, useRef } from 'react'
+import React, { useState, useCallback, useEffect, useRef, useMemo } from 'react'
 import { createPortal } from 'react-dom'
 import { useT } from './i18n'
 import { useWebSocket } from './hooks/useWebSocket'
@@ -72,6 +72,15 @@ const App: React.FC = () => {
   const sim = useSimulation(ws.subscribe, device.primaryDevice?.udid)
   const joystick = useJoystick(ws.sendMessage, sim.mode === SimMode.Joystick)
   const bm = useBookmarks()
+  // Keep the Supercluster input identity stable across position/status ticks.
+  // Rebuild its spatial index only when the saved bookmark collection changes.
+  const bookmarkPins = useMemo(() => bm.bookmarks.map((b: any) => ({
+    id: b.id,
+    name: b.name,
+    lat: b.lat,
+    lng: b.lng,
+    country_code: b.country_code || '',
+  })), [bm.bookmarks])
 
   const [savedRoutes, setSavedRoutes] = useState<any[]>([])
   const [routeCategories, setRouteCategories] = useState<any[]>([])
@@ -2202,9 +2211,7 @@ const App: React.FC = () => {
           deviceConnected={device.connectedDevice !== null}
           onShowToast={showToast}
           userAvatarHtml={avatarToHtml(userAvatar, customPng)}
-          bookmarkPins={bm.bookmarks.map((b: any) => ({
-            id: b.id, name: b.name, lat: b.lat, lng: b.lng, country_code: b.country_code || '',
-          }))}
+          bookmarkPins={bookmarkPins}
           showBookmarkPins={showBookmarkPins}
           onMapReady={(api) => { mapApiRef.current = api }}
           previewPin={previewPin}

@@ -10,7 +10,7 @@ from pathlib import Path
 
 from config import BOOKMARKS_FILE
 from models.schemas import Bookmark, BookmarkCategory, BookmarkStore
-from services.json_safe import safe_load_json, safe_write_json
+from services.json_safe import backup_invalid_json, safe_load_json, safe_write_json
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +67,7 @@ class BookmarkManager:
             )
         except Exception as exc:
             logger.warning("Bookmark payload failed schema validation: %s", exc)
+            backup_invalid_json(Path(BOOKMARKS_FILE), f"schema validation: {exc}")
 
     def _save(self) -> None:
         """Persist the current store to disk via atomic tmp + rename."""
