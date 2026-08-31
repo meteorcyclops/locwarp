@@ -204,26 +204,36 @@ ipcMain.handle('locate-pc', async () => {
   }
 })
 
-// Keep the menu visually hidden, but restore native edit roles so
-// Windows/Linux keyboard shortcuts like Ctrl+C / Ctrl+V still work inside
-// inputs after packaging.
-Menu.setApplicationMenu(Menu.buildFromTemplate([
-  {
-    label: 'Edit',
-    submenu: [
-      { role: 'undo' },
-      { role: 'redo' },
-      { type: 'separator' },
-      { role: 'cut' },
-      { role: 'copy' },
-      { role: 'paste' },
-      { role: 'pasteAndMatchStyle' },
-      { role: 'delete' },
-      { type: 'separator' },
-      { role: 'selectAll' },
-    ],
-  },
-]))
+// Keep Windows/Linux visually compact while restoring the standard macOS
+// application menu.  A custom Edit-only menu removes Electron's native Quit
+// role, so Command+Q never reaches `before-quit` and can leave the backend
+// alive after the window disappears.  Native role menus also restore the
+// expected Command+W, Command+M, hide and fullscreen behaviors.
+const editMenu = {
+  label: 'Edit',
+  submenu: [
+    { role: 'undo' },
+    { role: 'redo' },
+    { type: 'separator' },
+    { role: 'cut' },
+    { role: 'copy' },
+    { role: 'paste' },
+    { role: 'pasteAndMatchStyle' },
+    { role: 'delete' },
+    { type: 'separator' },
+    { role: 'selectAll' },
+  ],
+}
+const applicationMenuTemplate = process.platform === 'darwin'
+  ? [
+      { role: 'appMenu' },
+      { role: 'fileMenu' },
+      { role: 'editMenu' },
+      { role: 'viewMenu' },
+      { role: 'windowMenu' },
+    ]
+  : [editMenu]
+Menu.setApplicationMenu(Menu.buildFromTemplate(applicationMenuTemplate))
 
 let mainWindow
 let networkContext = null

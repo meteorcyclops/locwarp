@@ -1,4 +1,6 @@
 import asyncio
+import ipaddress
+import socket
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -194,6 +196,75 @@ class WifiPortFlowTests(unittest.IsolatedAsyncioTestCase):
             {("192.168.1.116", 50268), ("192.168.1.102", 49152)},
         )
         port_scan.assert_awaited_once_with("192.168.1.102", stop_after_hits=8)
+
+    def test_primary_network_uses_real_netmask_and_bounds_large_lans(self):
+        address = SimpleNamespace(
+            family=socket.AF_INET,
+            address="172.21.40.68",
+            netmask="255.255.252.0",
+        )
+        with (
+            patch.object(device_api, "_get_primary_local_ip", return_value="172.21.40.68"),
+            patch("psutil.net_if_addrs", return_value={"en4": [address]}),
+        ):
+            local_ip, network = device_api._get_primary_local_network()
+
+        self.assertEqual(local_ip, "172.21.40.68")
+        self.assertEqual(network, ipaddress.ip_network("172.21.40.0/22"))
+
+        address.netmask = "255.255.0.0"
+        with (
+            patch.object(device_api, "_get_primary_local_ip", return_value="172.21.40.68"),
+            patch("psutil.net_if_addrs", return_value={"en4": [address]}),
+        ):
+            _, bounded = device_api._get_primary_local_network()
+
+        self.assertEqual(bounded, ipaddress.ip_network("172.21.40.0/22"))
+
+    async def test_subnet_scan_reaches_the_far_edge_of_a_slash_22(self):
+        probes: list[str] = []
+
+        async def probe(ip, _port, _timeout):
+            probes.append(ip)
+            return ip == "172.21.43.200"
+
+        with (
+            patch.object(
+                device_api,
+                "_get_primary_local_network",
+                return_value=("172.21.40.68", ipaddress.ip_network("172.21.40.0/22")),
+            ),
+            patch.object(device_api, "_tcp_probe", side_effect=probe),
+        ):
+            hits = await device_api._scan_subnet_for_port(62078)
+
+        self.assertEqual(hits, ["172.21.43.200"])
+        self.assertIn("172.21.43.200", probes)
+        self.assertNotIn("172.21.40.68", probes)
+
+    async def test_subnet_scan_bounds_probe_concurrency(self):
+        active = 0
+        maximum = 0
+
+        async def probe(_ip, _port, _timeout):
+            nonlocal active, maximum
+            active += 1
+            maximum = max(maximum, active)
+            await asyncio.sleep(0)
+            active -= 1
+            return False
+
+        with (
+            patch.object(
+                device_api,
+                "_get_primary_local_network",
+                return_value=("192.168.50.5", ipaddress.ip_network("192.168.50.0/24")),
+            ),
+            patch.object(device_api, "_tcp_probe", side_effect=probe),
+        ):
+            await device_api._scan_subnet_for_port(62078, concurrency=32)
+
+        self.assertLessEqual(maximum, 32)
 
     async def test_manual_port_scan_drops_known_lockdownd_port(self):
         scan = AsyncMock(return_value=[62078, 54000])

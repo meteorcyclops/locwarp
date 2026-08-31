@@ -132,7 +132,9 @@ async def wifi_tunnel_connect(req: WifiTunnelConnectRequest):
 # ── WiFi Tunnel lifecycle (start / status / stop) ───────
 
 import asyncio
+import ipaddress
 import logging
+import socket
 import sys
 
 from core.wifi_tunnel import TunnelRunner
@@ -649,6 +651,7 @@ NON_REMOTEPAIRING_PORTS = frozenset({62078})
 # bites when several candidates are silently dropped by the network.
 TUNNEL_START_BUDGET = 45.0
 WIFI_DISCOVERY_BUDGET = 20.0
+MAX_DISCOVERY_SUBNET_ADDRESSES = 1024
 _wifi_discovery_task: asyncio.Task[dict] | None = None
 
 
@@ -669,6 +672,52 @@ def _get_primary_local_ip() -> str | None:
         return ip
     except OSError:
         return None
+
+
+def _get_primary_local_network() -> tuple[str, ipaddress.IPv4Network] | None:
+    """Return the primary IPv4 and its real LAN network, bounded to /22.
+
+    Home and mobile hotspots are commonly /24, but managed Wi-Fi networks
+    often use /23 or /22.  The old fixed /24 fallback could therefore miss a
+    paired iPhone that was genuinely on the same Wi-Fi.  Conversely, sweeping
+    a whole /16 would schedule too many probes, so larger networks are limited
+    to the /22 block containing the Mac and Bonjour remains the primary path.
+    """
+    my_ip = _get_primary_local_ip()
+    if not my_ip:
+        return None
+
+    netmask = "255.255.255.0"
+    try:
+        import psutil  # type: ignore[import-not-found]
+
+        for addresses in psutil.net_if_addrs().values():
+            match = next(
+                (
+                    address
+                    for address in addresses
+                    if address.family == socket.AF_INET and address.address == my_ip
+                ),
+                None,
+            )
+            if match is not None:
+                netmask = match.netmask or netmask
+                break
+    except Exception as exc:
+        _tunnel_logger.debug(
+            "Unable to resolve netmask for %s; using /24 discovery fallback: %s",
+            my_ip,
+            exc,
+        )
+
+    try:
+        network = ipaddress.ip_network(f"{my_ip}/{netmask}", strict=False)
+    except ValueError:
+        network = ipaddress.ip_network(f"{my_ip}/24", strict=False)
+
+    if network.num_addresses > MAX_DISCOVERY_SUBNET_ADDRESSES:
+        network = ipaddress.ip_network(f"{my_ip}/22", strict=False)
+    return my_ip, network
 
 
 async def _tcp_probe(ip: str, port: int, timeout: float = 0.4) -> bool:
@@ -693,23 +742,30 @@ async def _tcp_probe(ip: str, port: int, timeout: float = 0.4) -> bool:
         sock.close()
 
 
-async def _scan_subnet_for_port(port: int = 49152) -> list[str]:
-    """Scan the local /24 subnet for hosts responding on the given TCP port."""
-    my_ip = _get_primary_local_ip()
-    if not my_ip:
+async def _scan_subnet_for_port(
+    port: int = 49152,
+    concurrency: int = 128,
+) -> list[str]:
+    """Scan the bounded primary LAN for hosts responding on one TCP port."""
+    primary = _get_primary_local_network()
+    if primary is None:
         return []
-    try:
-        parts = my_ip.split(".")
-        prefix = ".".join(parts[:3])
-    except (AttributeError, IndexError):
-        return []
+    my_ip, network = primary
 
-    candidates = [f"{prefix}.{i}" for i in range(1, 255) if f"{prefix}.{i}" != my_ip]
-    results = await asyncio.gather(
-        *[_tcp_probe(ip, port, 0.4) for ip in candidates],
-        return_exceptions=True,
-    )
-    hits = [ip for ip, ok in zip(candidates, results) if ok is True]
+    candidates = [str(ip) for ip in network.hosts() if str(ip) != my_ip]
+    batch_size = max(1, int(concurrency))
+    hits: list[str] = []
+    for batch_start in range(0, len(candidates), batch_size):
+        batch = candidates[batch_start:batch_start + batch_size]
+        results = await asyncio.gather(
+            *(_tcp_probe(ip, port, 0.4) for ip in batch),
+            return_exceptions=True,
+        )
+        hits.extend(ip for ip, ok in zip(batch, results) if ok is True)
+        # Give FastAPI health/status calls a scheduling point between batches.
+        # A /22 contains roughly 1,000 addresses; scheduling every socket at
+        # once made the renderer look frozen even though discovery succeeded.
+        await asyncio.sleep(0)
     return hits
 
 
@@ -779,8 +835,8 @@ async def wifi_tunnel_find_port(req: WifiTunnelFindPortRequest):
 
 async def _wifi_tunnel_discover_impl() -> dict:
     """Find iPhones on the local network. First tries mDNS (Bonjour RemotePairing
-    broadcast); if that yields nothing, falls back to a /24 subnet TCP scan on the
-    standard RemotePairing port (49152)."""
+    broadcast); when fewer devices than capacity are visible, augments it with a
+    bounded scan of the primary LAN's real subnet."""
     results: list[dict] = []
 
     # --- 1) mDNS / Bonjour broadcast ---
@@ -813,11 +869,12 @@ async def _wifi_tunnel_discover_impl() -> dict:
     except Exception as e:
         _tunnel_logger.warning("mDNS browse failed: %s", e)
 
-    # --- 2) Fallback: smart /24 scan ---
-    # Old behavior tested only port 49152 across /24, which missed any iPhone
+    # --- 2) Fallback: smart bounded-subnet scan ---
+    # Old behavior tested only port 49152 across a fixed /24, which missed any iPhone
     # that bound RemotePairing higher in the 49152-65535 dynamic range (most
     # of them, after the first reboot). Two-phase replacement:
-    #   a) probe every host on /24 against a small set of "iPhone tells"
+    #   a) probe every host in the bounded real subnet against a small set of
+    #      "iPhone tells"
     #      (49152 legacy port + 62078 lockdown) to find live candidates
     #   b) full-range scan (49152-65535) on each candidate to find the
     #      port iOS actually picked this boot
@@ -829,7 +886,7 @@ async def _wifi_tunnel_discover_impl() -> dict:
     discovered_ips = {str(item.get("ip") or "") for item in results}
     if len(discovered_ips) < MAX_DEVICES:
         _tunnel_logger.info(
-            "mDNS found %d/%d address(es); augmenting with smart /24 scan",
+            "mDNS found %d/%d address(es); augmenting with smart subnet scan",
             len(discovered_ips),
             MAX_DEVICES,
         )
@@ -837,7 +894,7 @@ async def _wifi_tunnel_discover_impl() -> dict:
             my_ip = _get_primary_local_ip()
             candidates: set[str] = set()
             if my_ip:
-                # Phase a: probe a few likely ports across the /24 in
+                # Phase a: probe a few likely ports across the bounded LAN in
                 # parallel. ANY hit means "host is alive and probably
                 # interesting" — we'll full-range scan it next.
                 probe_ports = (49152, 62078)
