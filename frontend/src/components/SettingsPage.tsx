@@ -10,6 +10,7 @@ import { getInitialPosition, setInitialPosition } from '../services/api';
 import { useUpdateCheck } from './UpdateChecker';
 import type { RenderMode, RenderModeInfo } from '../types/electron';
 import { BRAND } from '../config/brand';
+import SystemDiagnosticsPanel from './SystemDiagnosticsPanel';
 
 interface Props {
   onOpenLogFolder: () => void;
@@ -193,6 +194,11 @@ const SettingsPage: React.FC<Props> = ({ onOpenLogFolder, onEnableDeveloperMode 
             <Chevron />
           </span>
         </button>
+      </div>
+
+      <div className="ios-group-label">{t('diagnostics.group_title')}</div>
+      <div className="ios-card diagnostics-card">
+        <SystemDiagnosticsPanel />
       </div>
 
       {initOpen && createPortal((

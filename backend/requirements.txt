@@ -1,6 +1,6 @@
 # v0.2.196's userspace WiFi tunnel API (UserspaceRsdTunnel/UserspaceDialPlane)
 # is provided by pymobiledevice3 11.2.x. Pin the exact version exercised by the
-# kx.17 frozen-worker and package gates so a rebuild cannot silently change the
+# kx.18 frozen-worker and package gates so a rebuild cannot silently change the
 # per-UDID worker/fallback transport.
 pymobiledevice3==11.2.4
 fastapi>=0.141.1

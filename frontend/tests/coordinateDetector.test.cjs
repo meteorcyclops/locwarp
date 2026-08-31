@@ -491,3 +491,92 @@ test('OCR arrays and reset are supported by the same detector contract', async (
   assert.equal(detector.processFrame(['25.034,121.566'], 0).status, 'baseline');
   assert.equal(detector.getSnapshot().initialized, true);
 });
+
+test('GPS telemetry measures helper counters and uses processed OCR frames as the denominator', async () => {
+  const {
+    createGpsWatchTelemetry,
+    getGpsWatchTelemetryMetrics,
+    recordGpsWatchTelemetry,
+  } = await moduleUnderTest;
+  let telemetry = createGpsWatchTelemetry(0);
+  telemetry = recordGpsWatchTelemetry(telemetry, {
+    atMs: 0,
+    capturedFrameCount: 1,
+    processedFrameCount: 1,
+    captureDroppedCount: 0,
+    queuedFrameCount: 1,
+    recognized: true,
+  });
+  telemetry = recordGpsWatchTelemetry(telemetry, {
+    atMs: 1000,
+    capturedFrameCount: 7,
+    processedFrameCount: 3,
+    captureDroppedCount: 2,
+    queuedFrameCount: 0,
+    recognized: false,
+  });
+
+  const metrics = getGpsWatchTelemetryMetrics(telemetry);
+  assert.equal(metrics.captureFps, 7);
+  assert.equal(metrics.ocrFps, 3);
+  assert.equal(metrics.recognizedFrames, 1);
+  assert.equal(metrics.processedFrames, 3);
+  assert.equal(metrics.recognitionSuccessRate, 1 / 3);
+  assert.equal(metrics.captureDroppedCount, 2);
+  assert.equal(metrics.queuedFrameCount, 0);
+});
+
+test('GPS telemetry does not invent OCR FPS or success rate when helper counters are absent', async () => {
+  const {
+    createGpsWatchTelemetry,
+    getGpsWatchTelemetryMetrics,
+    recordGpsWatchTelemetry,
+  } = await moduleUnderTest;
+  let telemetry = createGpsWatchTelemetry(0);
+  telemetry = recordGpsWatchTelemetry(telemetry, {
+    atMs: 0,
+    capturedFrameCount: 1,
+    recognized: true,
+  });
+  telemetry = recordGpsWatchTelemetry(telemetry, {
+    atMs: 1000,
+    capturedFrameCount: 5,
+    recognized: false,
+  });
+
+  const metrics = getGpsWatchTelemetryMetrics(telemetry);
+  assert.equal(metrics.captureFps, 5);
+  assert.equal(metrics.ocrFps, undefined);
+  assert.equal(metrics.processedFrames, undefined);
+  assert.equal(metrics.recognitionSuccessRate, undefined);
+  assert.equal(metrics.recognizedFrames, 1);
+});
+
+test('GPS telemetry rebaselines after a helper counter reset instead of reporting negative rates', async () => {
+  const {
+    createGpsWatchTelemetry,
+    getGpsWatchTelemetryMetrics,
+    recordGpsWatchTelemetry,
+  } = await moduleUnderTest;
+  let telemetry = createGpsWatchTelemetry(0);
+  telemetry = recordGpsWatchTelemetry(telemetry, {
+    atMs: 0,
+    capturedFrameCount: 10,
+    processedFrameCount: 5,
+  });
+  telemetry = recordGpsWatchTelemetry(telemetry, {
+    atMs: 1000,
+    capturedFrameCount: 12,
+    processedFrameCount: 6,
+  });
+  assert.equal(getGpsWatchTelemetryMetrics(telemetry).captureFps, 12);
+
+  telemetry = recordGpsWatchTelemetry(telemetry, {
+    atMs: 2000,
+    capturedFrameCount: 1,
+    processedFrameCount: 1,
+  });
+  const metrics = getGpsWatchTelemetryMetrics(telemetry);
+  assert.equal(metrics.captureFps, undefined);
+  assert.equal(metrics.ocrFps, undefined);
+});

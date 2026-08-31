@@ -1,7 +1,7 @@
 """Regression checks for the v0.2.196 backend dependency upgrade.
 
 These checks intentionally stay hardware-free.  They verify that the runtime
-has the userspace tunnel API that kx.17 uses and that the frozen backend keeps
+has the userspace tunnel API that kx.18 uses and that the frozen backend keeps
 the dynamic PyTCP modules plus the custom worker/DDI collection entries.
 """
 
@@ -50,7 +50,7 @@ class BackendDependencyUpgradeTests(unittest.TestCase):
         self.assertIn("*pytcp_hidden", spec)
         self.assertIn("*pytcp_binaries", spec)
         self.assertIn("*pytcp_datas", spec)
-        # Existing DDI/apple-compress metadata and the kx.17 worker entrypoint
+        # Existing DDI/apple-compress metadata and the kx.18 worker entrypoint
         # are part of the custom frozen-backend contract.
         self.assertIn("collect_all('apple_compress')", spec)
         self.assertIn("copy_metadata('apple-compress')", spec)

@@ -128,7 +128,7 @@ from packaging.version import Version
 pmd_version = Version(importlib.metadata.version("pymobiledevice3"))
 if pmd_version != Version("11.2.4"):
     raise SystemExit(
-        "expected pymobiledevice3 11.2.4 for the kx.17 "
+        "expected pymobiledevice3 11.2.4 for the kx.18 "
         f"userspace API, got {pmd_version}"
     )
 

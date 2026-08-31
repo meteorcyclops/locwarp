@@ -1,5 +1,12 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
-import { CoordinateAutoDetector, type Coordinate } from '../utils/coordinateDetector'
+import {
+  CoordinateAutoDetector,
+  createGpsWatchTelemetry,
+  getGpsWatchTelemetryMetrics,
+  recordGpsWatchTelemetry,
+  type Coordinate,
+  type GpsWatchTelemetryState,
+} from '../utils/coordinateDetector'
 import type { GpsWatchEvent, GpsWatchRegion } from '../types/electron'
 
 type WatchPhase =
@@ -25,6 +32,7 @@ export interface GpsWatchTeleportResult {
 interface WatchStats {
   queued: number
   succeeded: number
+  failed: number
   dropped: number
   expired: number
   framesSkipped: number
@@ -32,7 +40,14 @@ interface WatchStats {
 
 const GPS_QUEUE_POLICY_KEY = 'locwarp.gps_watch_queue_policy'
 const GPS_WATCH_TARGET_MODE_KEY = 'locwarp.gps_watch_target_mode'
-const EMPTY_STATS: WatchStats = { queued: 0, succeeded: 0, dropped: 0, expired: 0, framesSkipped: 0 }
+const EMPTY_STATS: WatchStats = {
+  queued: 0,
+  succeeded: 0,
+  failed: 0,
+  dropped: 0,
+  expired: 0,
+  framesSkipped: 0,
+}
 // Keep two matching OCR frames as the safety gate. This interval only limits
 // how quickly a confirmed new coordinate may follow the previous one.
 const GPS_WATCH_MIN_INTERVAL_MS = 300
@@ -95,6 +110,12 @@ const errorMessage = (event: GpsWatchEvent): string => {
   return event.message || 'GPS 畫面監看發生錯誤'
 }
 
+const formatMeasuredFps = (value: number | undefined): string =>
+  value === undefined ? '—' : value.toFixed(1)
+
+const formatSuccessRate = (value: number | undefined): string =>
+  value === undefined ? '—' : `${(value * 100).toFixed(1)}%`
+
 const GpsWatchControl: React.FC<Props> = ({
   isConnected,
   isRouteRunning,
@@ -112,6 +133,8 @@ const GpsWatchControl: React.FC<Props> = ({
   const [targetMode, setTargetMode] = useState<GpsWatchTargetMode>(storedTargetMode)
   const [delivery, setDelivery] = useState<{ ok: number; total: number; failed: number } | null>(null)
   const [stats, setStats] = useState<WatchStats>(EMPTY_STATS)
+  const [scanTelemetry, setScanTelemetry] = useState<GpsWatchTelemetryState | null>(null)
+  const [lastRecognizedCoordinate, setLastRecognizedCoordinate] = useState<Coordinate | null>(null)
   const detectorRef = useRef(createDetector(queuePolicy))
   const teleportRef = useRef(onTeleport)
   const connectedRef = useRef(isConnected)
@@ -135,6 +158,7 @@ const GpsWatchControl: React.FC<Props> = ({
   const queuePolicyRef = useRef<GpsQueuePolicy>(queuePolicy)
   const statsRef = useRef<WatchStats>(EMPTY_STATS)
   const lastPublishedStatusRef = useRef('')
+  const telemetryRef = useRef<GpsWatchTelemetryState | null>(null)
 
   useEffect(() => { teleportRef.current = onTeleport }, [onTeleport])
   useEffect(() => { connectedRef.current = isConnected }, [isConnected])
@@ -142,6 +166,33 @@ const GpsWatchControl: React.FC<Props> = ({
   useEffect(() => { routeRunningRef.current = isRouteRunning }, [isRouteRunning])
   useEffect(() => { targetModeRef.current = targetMode }, [targetMode])
   useEffect(() => { teleportAllRef.current = onTeleportAll }, [onTeleportAll])
+
+  const resetScanObservability = useCallback((startedAtMs?: number) => {
+    const next = startedAtMs === undefined ? null : createGpsWatchTelemetry(startedAtMs)
+    telemetryRef.current = next
+    setScanTelemetry(next)
+    setLastRecognizedCoordinate(null)
+    statsRef.current = EMPTY_STATS
+    setStats(EMPTY_STATS)
+    setDelivery(null)
+    lastPublishedStatusRef.current = ''
+  }, [])
+
+  const recordScanTelemetry = useCallback((event: GpsWatchEvent, recognized = false) => {
+    const capture = event.capture
+    const previous = telemetryRef.current ?? createGpsWatchTelemetry()
+    const next = recordGpsWatchTelemetry(previous, {
+      atMs: Date.now(),
+      capturedFrameCount: event.capturedFrameCount ?? capture?.capturedFrameCount,
+      processedFrameCount: event.processedFrameCount ?? capture?.processedFrameCount,
+      captureDroppedCount: event.captureDroppedCount ?? capture?.captureDroppedCount,
+      queuedFrameCount: event.queuedFrameCount ?? capture?.queuedFrameCount,
+      ocrInFlight: event.ocrInFlight ?? capture?.ocrInFlight,
+      recognized,
+    })
+    telemetryRef.current = next
+    setScanTelemetry(next)
+  }, [])
 
   const publishStats = useCallback((patch: Partial<WatchStats> = {}) => {
     const snapshot = detectorRef.current.getSnapshot()
@@ -199,7 +250,7 @@ const GpsWatchControl: React.FC<Props> = ({
     sessionRef.current += 1
     sessionTargetsRef.current = []
     detectorRef.current.reset()
-    setDelivery(null)
+    if (resetUi && !terminalNotice) setDelivery(null)
     if (resetUi) {
       setPhase('stopping')
       setDetail('GPS 畫面監看已停止，正在釋放擷取資源…')
@@ -215,12 +266,13 @@ const GpsWatchControl: React.FC<Props> = ({
           setPhase('error')
           setDetail(terminalNotice)
         } else {
+          resetScanObservability()
           setPhase('idle')
           setDetail('支援十進位、度分、度分秒，自動轉換')
         }
       }
     }
-  }, [])
+  }, [resetScanObservability])
 
   // Keep the group contract local to the renderer. Newer App code can use a
   // single backend-aware fan-out callback; older callers remain compatible by
@@ -279,8 +331,17 @@ const GpsWatchControl: React.FC<Props> = ({
         onShowToast(message, 8000)
         return
       }
+      if (event.event === 'status') {
+        // The helper may emit a status snapshot independently of frame OCR.
+        // It is useful for queue/drop visibility but never counts as a
+        // recognized frame.
+        recordScanTelemetry(event)
+        return
+      }
       if (event.event === 'started') {
         if (stoppingRef.current) return
+        resetScanObservability(Date.now())
+        setDelivery({ ok: 0, total: sessionTargetsRef.current.length, failed: 0 })
         setPhase('watching')
         setDetail('辨識中 · 第一筆座標也會在連續兩幀確認後瞬移')
         return
@@ -294,6 +355,11 @@ const GpsWatchControl: React.FC<Props> = ({
           ? event.candidates
           : (event.texts ?? [])
         const result = detectorRef.current.observe(frameInput)
+        const recognized = result.candidates.length > 0
+        recordScanTelemetry(event, recognized)
+        if (recognized) {
+          setLastRecognizedCoordinate(result.candidates[result.candidates.length - 1])
+        }
         publishStats({
           dropped: result.droppedCount,
           expired: result.expiredCount ?? 0,
@@ -320,6 +386,7 @@ const GpsWatchControl: React.FC<Props> = ({
 
         if (!connectedRef.current || routeRunningRef.current) {
           detectorRef.current.markFailed(result.attemptId)
+          publishStats({ failed: statsRef.current.failed + 1 })
           setPhase('error')
           setDetail(routeRunningRef.current ? '路線執行中，已停止自動瞬移' : '裝置未連線，已停止監看')
           void stop(true, false)
@@ -337,6 +404,7 @@ const GpsWatchControl: React.FC<Props> = ({
           : `瞬移中 · ${formatCoordinate(coordinate)}`)
         if (sessionTargets.length === 0) {
           detectorRef.current.markFailed(attemptId)
+          publishStats({ failed: statsRef.current.failed + 1 })
           setPhase('error')
           setDetail('目標裝置已斷線，GPS 畫面監看已停止')
           void stop(true, false)
@@ -365,6 +433,7 @@ const GpsWatchControl: React.FC<Props> = ({
           // source screen visible (reveal=false) and reporting n/N.
           if (modeForSession === 'all' && failed > 0) {
             detectorRef.current.markFailed(attemptId)
+            publishStats({ failed: statsRef.current.failed + 1 })
             const message = `同步停止 · ${succeeded}/${sessionTargets.length} 台已送出${failureDetail ? ` · ${failureDetail}` : ''}`
             setLastCoordinate(coordinate)
             setPhase('error')
@@ -394,6 +463,7 @@ const GpsWatchControl: React.FC<Props> = ({
         }).catch((error: any) => {
           if (session !== sessionRef.current || stoppingRef.current) return
           detectorRef.current.markFailed(attemptId)
+          publishStats({ failed: statsRef.current.failed + 1 })
           const message = error?.message || '瞬移失敗'
           setPhase('error')
           setDetail(message)
@@ -426,6 +496,7 @@ const GpsWatchControl: React.FC<Props> = ({
           setPhase('error')
           setDetail(terminalNotice)
         } else {
+          resetScanObservability()
           setPhase('idle')
           setDetail(event.reason === 'escape' || event.reason === 'hotkey'
             ? '已由快捷鍵停止 GPS 監看'
@@ -433,7 +504,7 @@ const GpsWatchControl: React.FC<Props> = ({
         }
       }
     })
-  }, [onShowToast, publishStats, stop])
+  }, [onShowToast, publishStats, recordScanTelemetry, resetScanObservability, stop])
 
   useEffect(() => {
     const gpsWatch = window.electronAPI?.gpsWatch
@@ -475,6 +546,7 @@ const GpsWatchControl: React.FC<Props> = ({
       if (state === 'idle') {
         stopPendingRef.current = false
         stoppingRef.current = false
+        resetScanObservability()
         setPhase('idle')
         setDetail('GPS 畫面監看已停止')
         return
@@ -491,7 +563,7 @@ const GpsWatchControl: React.FC<Props> = ({
       cancelled = true
       if (timer) clearTimeout(timer)
     }
-  }, [phase])
+  }, [phase, resetScanObservability])
 
   useEffect(() => {
     const isActive = phase === 'selecting'
@@ -573,10 +645,8 @@ const GpsWatchControl: React.FC<Props> = ({
     }
     sessionTargetsRef.current = initialTargets
     detectorRef.current = createDetector(queuePolicyRef.current)
-    statsRef.current = EMPTY_STATS
-    setDelivery(null)
-    setStats(EMPTY_STATS)
-    lastPublishedStatusRef.current = ''
+    resetScanObservability()
+    setDelivery({ ok: 0, total: initialTargets.length, failed: 0 })
     publishStats(EMPTY_STATS)
     setAmbiguous([])
     setPhase('selecting')
@@ -593,6 +663,7 @@ const GpsWatchControl: React.FC<Props> = ({
         return
       }
       if (!selection.ok || !selection.region) {
+        resetScanObservability()
         setPhase('idle')
         setDetail(selection.code === 'cancelled' ? '已取消框選' : '無法開啟框選畫面')
         return
@@ -619,7 +690,7 @@ const GpsWatchControl: React.FC<Props> = ({
       setDetail(message)
       onShowToast(message, 8000)
     }
-  }, [isConnected, isRouteRunning, onShowToast, targetUdid])
+  }, [isConnected, isRouteRunning, onShowToast, publishStats, resetScanObservability, targetUdid])
 
   const chooseAmbiguous = useCallback(async (coordinate: Coordinate) => {
     const modeForSession = targetModeRef.current
@@ -637,6 +708,7 @@ const GpsWatchControl: React.FC<Props> = ({
         const failed = outcome.failed.length
         setDelivery({ ok: succeeded, total: sessionTargets.length, failed })
         if (failed > 0) {
+          publishStats({ failed: statsRef.current.failed + 1 })
           const failureDetail = outcome.failed
             .map((item) => `${item.udid.slice(0, 6)}: ${item.reason}`)
             .join('；')
@@ -658,21 +730,25 @@ const GpsWatchControl: React.FC<Props> = ({
       // selection. A standalone one-shot choice retains the old idle result.
       const keepWatching = modeForSession === 'all' && sessionTargets.length > 0
         && sessionRef.current > 0 && !stoppingRef.current
+      if (!keepWatching) resetScanObservability()
       setPhase(keepWatching ? 'watching' : 'idle')
       setDetail(keepWatching
         ? `監看中 · ${formatCoordinate(coordinate)}`
         : `已瞬移 · ${formatCoordinate(coordinate)}；可重新框選`)
     } catch (error: any) {
+      publishStats({ failed: statsRef.current.failed + 1 })
       const message = error?.message || '瞬移失敗'
       setPhase('error')
       setDetail(message)
       onShowToast(`GPS 自動瞬移失敗：${message}`, 8000)
     }
-  }, [currentTargetUdids, dispatchAll, onShowToast, onTeleport, stop])
+  }, [currentTargetUdids, dispatchAll, onShowToast, onTeleport, publishStats, resetScanObservability, stop])
 
   const active = phase !== 'idle' && phase !== 'error' && phase !== 'ambiguous'
   const unavailable = window.electronAPI?.platform !== 'darwin'
   const skipped = stats.dropped + stats.expired
+  const telemetryMetrics = scanTelemetry ? getGpsWatchTelemetryMetrics(scanTelemetry) : undefined
+  const showObservability = phase !== 'idle'
 
   return (
     <div className={`gps-watch-control phase-${phase}`}>
@@ -724,15 +800,42 @@ const GpsWatchControl: React.FC<Props> = ({
       </button>
       <div className="gps-watch-detail">
         <span>{detail}</span>
-        {active && (
-          <span className="gps-watch-stats">
-            <b>{queuePolicy === 'latest' ? '極速' : '完整'}</b>
-            <em>排 {stats.queued}</em>
-            <em>成 {stats.succeeded}</em>
-            <em>略 {skipped}</em>
-            {delivery && <em>送 {delivery.ok}/{delivery.total}</em>}
-            {stats.framesSkipped > 0 && <em>幀 {stats.framesSkipped}</em>}
-          </span>
+        {showObservability && (
+          <>
+            <span className="gps-watch-stats">
+              <b>{queuePolicy === 'latest' ? '極速' : '完整'}</b>
+              <em title="CoordinateAutoDetector 目前等待中的穩定座標">排 {stats.queued}</em>
+              <em title="已成功完成的瞬移嘗試">成 {stats.succeeded}</em>
+              <em title="候選 queue overflow 與 TTL 過期的總數">略 {skipped}</em>
+              <em title="瞬移/同步送達失敗的嘗試">失 {stats.failed}</em>
+              {delivery && <em title="目前這筆座標已送達/目標裝置總數">送 {delivery.ok}/{delivery.total}</em>}
+              {delivery && delivery.failed > 0 && <em title="目前這筆座標送達失敗的裝置數">送失 {delivery.failed}</em>}
+              <em title="ScreenCaptureKit capture mailbox 已丟棄的累計幀數">
+                擷丟 {telemetryMetrics?.captureDroppedCount ?? stats.framesSkipped}
+              </em>
+              <em title="ScreenCaptureKit capture mailbox 目前佇列數">
+                擷排 {telemetryMetrics?.queuedFrameCount ?? '—'}
+              </em>
+            </span>
+            <span className="gps-watch-stats" aria-live="polite">
+              <em title="helper capturedFrameCount / 實際量測秒數">擷 {formatMeasuredFps(telemetryMetrics?.captureFps)} fps</em>
+              <em title="helper processedFrameCount / 實際量測秒數">OCR {formatMeasuredFps(telemetryMetrics?.ocrFps)} fps</em>
+              <em title="有效座標 OCR 幀 / helper 已進入 OCR 幀（processedFrameCount）">
+                辨 {formatSuccessRate(telemetryMetrics?.recognitionSuccessRate)} ({telemetryMetrics?.recognizedFrames ?? 0}/{telemetryMetrics?.processedFrames ?? '—'})
+              </em>
+              {telemetryMetrics?.ocrInFlight !== undefined && (
+                <em title="helper 是否正在執行 Vision OCR">{telemetryMetrics.ocrInFlight ? 'OCR中' : 'OCR閒'}</em>
+              )}
+            </span>
+            <span className="gps-watch-stats">
+              <em title="最近一幀通過 parser、confidence、範圍與安全門檻的座標">
+                最近辨識 {lastRecognizedCoordinate ? formatCoordinate(lastRecognizedCoordinate) : '—'}
+              </em>
+            </span>
+            <small>
+              成功率＝有效座標 OCR 幀／helper 已進入 OCR 幀（processedFrameCount）；FPS 取 helper 累計計數實測
+            </small>
+          </>
         )}
         {lastCoordinate && phase === 'idle' && (
           <code>{formatCoordinate(lastCoordinate)}</code>
@@ -749,7 +852,7 @@ const GpsWatchControl: React.FC<Props> = ({
               {formatCoordinate(coordinate)}
             </button>
           ))}
-          <button className="cancel" onClick={() => { setAmbiguous([]); setPhase('idle') }}>取消</button>
+          <button className="cancel" onClick={() => { setAmbiguous([]); resetScanObservability(); setPhase('idle') }}>取消</button>
         </div>
       )}
     </div>

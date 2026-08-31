@@ -147,14 +147,19 @@ function formatError(detail: unknown, fallback: string): string {
   return maybeAttachDevModeHint(fallback)
 }
 
-async function request<T>(method: string, path: string, body?: unknown, options?: { signal?: AbortSignal }): Promise<T> {
+async function request<T>(
+  method: string,
+  path: string,
+  body?: unknown,
+  options?: { signal?: AbortSignal; maxAttempts?: number },
+): Promise<T> {
   const opts: RequestInit = {
     method,
     headers: authenticatedHeaders({ 'Content-Type': 'application/json' }),
     signal: options?.signal,
   }
   if (body !== undefined) opts.body = JSON.stringify(body)
-  const res = await fetchWithRetry(`${API}${path}`, opts)
+  const res = await fetchWithRetry(`${API}${path}`, opts, options?.maxAttempts)
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: res.statusText })) as { detail?: unknown }
     const failure = new Error(formatError(err.detail, res.statusText)) as ApiError
@@ -222,6 +227,41 @@ export interface ConnectionHealth {
 }
 export const getConnectionDiagnostics = () =>
   request<{ devices: ConnectionHealth[]; usb_flapping: boolean }>('GET', '/api/diagnostics/connection')
+export interface SystemDiagnostics {
+  status: 'healthy' | 'degraded'
+  app_version: string
+  uptime_seconds: number
+  platform: {
+    system: string
+    release: string
+    machine: string
+    python: string
+  }
+  dependencies: {
+    pymobiledevice3: string | null
+    pmd_pytcp: string | null
+  }
+  counts: {
+    connected_devices: number
+    simulation_engines: number
+    wifi_tunnels: number
+    gps_ready_devices: number
+    recovering_devices: number
+    max_devices: number | null
+  }
+  group: {
+    status: string
+    strict_sync: boolean | null
+    expected_count: number
+    ready_count: number
+    missing_udids: string[]
+    last_ack_delta_ms: number | null
+    max_ack_delta_ms: number | null
+  } | null
+  checked_at_unix: number
+}
+export const getSystemDiagnostics = () =>
+  request<SystemDiagnostics>('GET', '/api/diagnostics/system', undefined, { maxAttempts: 1 })
 export const wifiTunnelStatus = (signal?: AbortSignal) =>
   request<{
     tunnels: TunnelInfo[]

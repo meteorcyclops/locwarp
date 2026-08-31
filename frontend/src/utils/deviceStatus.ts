@@ -79,6 +79,90 @@ export function countGpsReady<T>(items: T[], stageOf: (item: T) => DeviceStage):
   return items.reduce((count, item) => count + (isGpsReady(stageOf(item)) ? 1 : 0), 0);
 }
 
+/**
+ * Transport information is intentionally normalized independently from the
+ * connection state.  A device can be known to the backend while its transport
+ * field is still unavailable; treating that as USB or Wi-Fi makes the status
+ * centre look healthier than the evidence supports.
+ */
+export type DeviceTransport = 'usb' | 'wifi' | 'unknown';
+
+export function getDeviceTransport(connectionType?: unknown, hasTunnel = false): DeviceTransport {
+  const value = String(connectionType ?? '').trim().toLowerCase().replace(/[_\s]/g, '-');
+  if (value === 'usb' || value === 'wired' || value === 'usbmux') return 'usb';
+  if (value === 'network' || value === 'wifi' || value === 'wi-fi' || value === 'wireless') return 'wifi';
+  // An active tunnel is an authoritative Wi-Fi transport signal even when an
+  // older /api/device/list response omitted connection_type.
+  if (hasTunnel) return 'wifi';
+  return 'unknown';
+}
+
+export type DeviceProgressStep = 'exploring' | 'tunnel' | 'gps' | 'recovery';
+export type DeviceProgressState = 'complete' | 'active' | 'pending' | 'unverified' | 'blocked' | 'not_applicable';
+export type DeviceProgress = Record<DeviceProgressStep, DeviceProgressState>;
+
+/**
+ * Return the evidence-backed progression for the compact per-device roster.
+ * `unverified` is deliberately different from `pending`: no backend event
+ * has proved that step yet, whereas `pending` means an earlier step is known
+ * to be complete and this is the next expected step.  USB has no Wi-Fi Tunnel
+ * stage, so that one is explicitly marked not applicable.
+ */
+export function getDeviceProgress(stage: DeviceStage, transport: DeviceTransport): DeviceProgress {
+  const tunnel = transport === 'usb' ? 'not_applicable' : 'unverified';
+  const initial: DeviceProgress = {
+    exploring: 'unverified',
+    tunnel,
+    gps: 'unverified',
+    recovery: 'unverified',
+  };
+
+  switch (stage) {
+    case 'paired':
+      // The device identity was discovered/paired, but no live transport has
+      // been proven yet.
+      return { ...initial, exploring: 'complete' };
+    case 'exploring':
+      return { ...initial, exploring: 'active' };
+    case 'tunnel':
+      return { ...initial, exploring: 'complete', tunnel: 'active', gps: 'pending', recovery: 'pending' };
+    case 'gps_waiting':
+      return {
+        ...initial,
+        exploring: 'complete',
+        tunnel: transport === 'usb' ? 'not_applicable' : 'complete',
+        gps: 'active',
+        recovery: 'pending',
+      };
+    case 'gps':
+      return {
+        ...initial,
+        exploring: 'complete',
+        tunnel: transport === 'usb' ? 'not_applicable' : 'complete',
+        gps: 'complete',
+        recovery: 'pending',
+      };
+    case 'recovering':
+      return {
+        ...initial,
+        exploring: 'complete',
+        tunnel: transport === 'usb' ? 'not_applicable' : 'complete',
+        // Recovery means the location channel is not currently safe to use.
+        // Do not leave GPS painted as complete until a fresh healthy write is
+        // observed, even if it was healthy before the interruption.
+        gps: 'blocked',
+        recovery: 'active',
+      };
+    case 'offline':
+      // No current stage is safe to mark complete after an explicit disconnect
+      // or flap.  Keep transport-specific N/A visible, but show the rest as
+      // unknown until a fresh event proves progress again.
+      return { ...initial, exploring: 'blocked', gps: 'unverified', recovery: 'unverified' };
+    default:
+      return initial;
+  }
+}
+
 export function formatUdidSuffix(udid: string | undefined | null, length = 8): string {
   const value = String(udid || '').trim();
   return value ? value.slice(-Math.max(1, length)).toUpperCase() : '';

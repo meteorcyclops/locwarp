@@ -568,6 +568,188 @@ export interface CoordinateDetectorSnapshot {
   nextAllowedAtMs?: number
 }
 
+/**
+ * Cumulative capture/OCR counters reported by the GPS Watch helper.
+ *
+ * These values intentionally remain separate from CoordinateAutoDetector's
+ * queue counters: the helper sees every capture callback, while the detector
+ * only sees OCR results that made it back to the renderer.
+ */
+export interface GpsWatchTelemetrySample {
+  /** Renderer receipt time, used only as the denominator for FPS. */
+  atMs: number
+  /** Helper frame number/cumulative capture callback count. */
+  capturedFrameCount?: number
+  /** Helper count of frames admitted to Vision OCR. */
+  processedFrameCount?: number
+  /** Helper cumulative capture-mailbox drops. */
+  captureDroppedCount?: number
+  /** Helper mailbox occupancy at the time of this sample. */
+  queuedFrameCount?: number
+  /** Whether the helper was running Vision OCR at this sample. */
+  ocrInFlight?: boolean
+  /** True once for a frame event containing at least one accepted coordinate. */
+  recognized?: boolean
+}
+
+/**
+ * Session-local GPS Watch telemetry state.
+ *
+ * `recognizedFrameCount` is a frame count, never a coordinate count. Its
+ * success-rate denominator is the helper's `processedFrameCount` (the number
+ * of frames admitted to OCR), so OCR failures and frames without coordinates
+ * remain in the denominator when the helper supplies that counter.
+ */
+export interface GpsWatchTelemetryState {
+  startedAtMs?: number
+  lastSampleAtMs?: number
+  capturedFrameCount?: number
+  processedFrameCount?: number
+  recognizedFrameCount: number
+  captureDroppedCount?: number
+  queuedFrameCount?: number
+  ocrInFlight?: boolean
+  rateStartedAtMs?: number
+  rateCapturedFrameBase?: number
+  rateProcessedFrameBase?: number
+}
+
+export interface GpsWatchTelemetryMetrics {
+  /** Measured capture callbacks per second, when two timestamped samples exist. */
+  captureFps?: number
+  /** Measured frames admitted to OCR per second, when two timestamped samples exist. */
+  ocrFps?: number
+  recognizedFrames: number
+  /** Undefined when the helper did not provide processedFrameCount. */
+  processedFrames?: number
+  /** recognizedFrames / processedFrames; never a candidate/coordinate ratio. */
+  recognitionSuccessRate?: number
+  captureDroppedCount?: number
+  queuedFrameCount?: number
+  ocrInFlight?: boolean
+}
+
+function normalizedTelemetryCounter(value: number | undefined): number | undefined {
+  if (value === undefined || !Number.isFinite(value)) return undefined
+  return Math.max(0, Math.floor(value))
+}
+
+function normalizedTelemetryTime(value: number): number | undefined {
+  return Number.isFinite(value) ? value : undefined
+}
+
+/** Create an empty telemetry session; no rate is reported until real samples arrive. */
+export function createGpsWatchTelemetry(startedAtMs?: number): GpsWatchTelemetryState {
+  return {
+    startedAtMs: startedAtMs === undefined ? undefined : normalizedTelemetryTime(startedAtMs),
+    recognizedFrameCount: 0,
+  }
+}
+
+/**
+ * Add one helper/status/frame sample without changing detector behaviour.
+ * Counter decreases are treated as a helper rebaseline so a restarted helper
+ * cannot produce negative or artificially huge FPS values.
+ */
+export function recordGpsWatchTelemetry(
+  previous: GpsWatchTelemetryState,
+  sample: GpsWatchTelemetrySample,
+): GpsWatchTelemetryState {
+  const atMs = normalizedTelemetryTime(sample.atMs)
+  if (atMs === undefined) return { ...previous }
+
+  const capturedFrameCount = normalizedTelemetryCounter(sample.capturedFrameCount)
+  const processedFrameCount = normalizedTelemetryCounter(sample.processedFrameCount)
+  const captureDroppedCount = normalizedTelemetryCounter(sample.captureDroppedCount)
+  const queuedFrameCount = normalizedTelemetryCounter(sample.queuedFrameCount)
+  const previousCaptured = previous.capturedFrameCount
+  const previousProcessed = previous.processedFrameCount
+  const countersReset = (
+    capturedFrameCount !== undefined
+    && previousCaptured !== undefined
+    && capturedFrameCount < previousCaptured
+  ) || (
+    processedFrameCount !== undefined
+    && previousProcessed !== undefined
+    && processedFrameCount < previousProcessed
+  )
+
+  let rateStartedAtMs = previous.rateStartedAtMs
+  let rateCapturedFrameBase = previous.rateCapturedFrameBase
+  let rateProcessedFrameBase = previous.rateProcessedFrameBase
+  if (countersReset) {
+    rateStartedAtMs = atMs
+    rateCapturedFrameBase = capturedFrameCount
+    rateProcessedFrameBase = processedFrameCount
+  } else {
+    if (capturedFrameCount !== undefined && rateCapturedFrameBase === undefined) {
+      rateStartedAtMs = rateStartedAtMs ?? previous.startedAtMs ?? atMs
+      rateCapturedFrameBase = previousCaptured ?? 0
+    }
+    if (processedFrameCount !== undefined && rateProcessedFrameBase === undefined) {
+      rateStartedAtMs = rateStartedAtMs ?? previous.startedAtMs ?? atMs
+      rateProcessedFrameBase = previousProcessed ?? 0
+    }
+  }
+
+  const nextStartedAtMs = previous.startedAtMs ?? atMs
+  const recognizedFrameCount = previous.recognizedFrameCount + (sample.recognized === true ? 1 : 0)
+  return {
+    startedAtMs: nextStartedAtMs,
+    lastSampleAtMs: atMs,
+    capturedFrameCount: capturedFrameCount ?? previousCaptured,
+    processedFrameCount: processedFrameCount ?? previousProcessed,
+    recognizedFrameCount,
+    captureDroppedCount: captureDroppedCount ?? previous.captureDroppedCount,
+    queuedFrameCount: queuedFrameCount ?? previous.queuedFrameCount,
+    ocrInFlight: sample.ocrInFlight ?? previous.ocrInFlight,
+    rateStartedAtMs,
+    rateCapturedFrameBase,
+    rateProcessedFrameBase,
+  }
+}
+
+function telemetryRate(
+  current: number | undefined,
+  base: number | undefined,
+  startedAtMs: number | undefined,
+  lastSampleAtMs: number | undefined,
+): number | undefined {
+  if (current === undefined || base === undefined || startedAtMs === undefined || lastSampleAtMs === undefined) {
+    return undefined
+  }
+  const elapsedSeconds = (lastSampleAtMs - startedAtMs) / 1000
+  if (!Number.isFinite(elapsedSeconds) || elapsedSeconds <= 0) return undefined
+  return Math.max(0, current - base) / elapsedSeconds
+}
+
+/** Derive display metrics from real helper counters; missing counters stay undefined. */
+export function getGpsWatchTelemetryMetrics(state: GpsWatchTelemetryState): GpsWatchTelemetryMetrics {
+  const processedFrames = state.processedFrameCount
+  return {
+    captureFps: telemetryRate(
+      state.capturedFrameCount,
+      state.rateCapturedFrameBase,
+      state.rateStartedAtMs,
+      state.lastSampleAtMs,
+    ),
+    ocrFps: telemetryRate(
+      processedFrames,
+      state.rateProcessedFrameBase,
+      state.rateStartedAtMs,
+      state.lastSampleAtMs,
+    ),
+    recognizedFrames: state.recognizedFrameCount,
+    processedFrames,
+    recognitionSuccessRate: processedFrames !== undefined && processedFrames > 0
+      ? Math.min(1, state.recognizedFrameCount / processedFrames)
+      : undefined,
+    captureDroppedCount: state.captureDroppedCount,
+    queuedFrameCount: state.queuedFrameCount,
+    ocrInFlight: state.ocrInFlight,
+  }
+}
+
 function finiteTimestamp(value: number, label: string): number {
   if (!Number.isFinite(value)) throw new RangeError(`${label} must be a finite number`)
   return value

@@ -44,6 +44,19 @@ export interface GpsWatchRegion {
   height: number
 }
 
+export interface GpsWatchCaptureTelemetry {
+  /** Cumulative ScreenCaptureKit callbacks accepted by the helper. */
+  capturedFrameCount?: number
+  /** Cumulative frames admitted to Vision OCR by the helper. */
+  processedFrameCount?: number
+  /** Cumulative frames discarded by the helper capture mailbox. */
+  captureDroppedCount?: number
+  /** Capture mailbox occupancy at the time the event was emitted. */
+  queuedFrameCount?: number
+  /** Whether Vision currently owns an OCR frame. */
+  ocrInFlight?: boolean
+}
+
 export interface GpsWatchEvent {
   event: 'ready' | 'permission' | 'started' | 'frame' | 'warning' | 'status' | 'error' | 'stopping' | 'stopped'
   state?: string
@@ -61,12 +74,24 @@ export interface GpsWatchEvent {
     boundingBox?: number[]
   }>
   captureDroppedCount?: number
+  capturedFrameCount?: number
+  processedFrameCount?: number
+  queuedFrameCount?: number
+  ocrInFlight?: boolean
+  capture?: GpsWatchCaptureTelemetry
 }
 
 declare global {
   interface Window {
     electronAPI?: {
       platform: NodeJS.Platform
+      runtimeVersions?: {
+        electron: string
+        chromium: string
+        node: string
+        platform: string
+        arch: string
+      }
       locatePc(): Promise<LocatePcResult>
       getRenderMode(): Promise<RenderModeInfo>
       setRenderMode(mode: RenderMode): Promise<{ ok: boolean }>

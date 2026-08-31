@@ -69,6 +69,15 @@ export interface DeviceRuntime {
 
 export type RuntimesMap = Record<string, DeviceRuntime>
 
+export interface GroupSyncMember {
+  udid: string
+  state?: string
+  connected?: boolean
+  lost?: boolean
+  degraded?: boolean
+  rejoined?: boolean
+}
+
 export interface GroupSyncStatus {
   status: 'paused' | 'recovering' | 'recovery_failed' | 'resumed' | 'cancelled' | string
   phase?: string
@@ -80,6 +89,13 @@ export interface GroupSyncStatus {
   attempt?: number
   max_attempts?: number
   missing_udids?: string[]
+  lost_udids?: string[]
+  degraded_udids?: string[]
+  paused_udids?: string[]
+  reconnected_count?: number
+  connected_count?: number
+  primary_udid?: string
+  members?: GroupSyncMember[]
   trigger_udid?: string
   reason?: string
   last_ack_delta_ms?: number

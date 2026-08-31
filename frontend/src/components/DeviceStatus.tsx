@@ -8,9 +8,15 @@ import { canonicalUdid, type WifiReconnectStatus } from '../utils/wifiReconnect'
 import {
   collapseLinkLocalDiscovery,
   countGpsReady,
+  formatUdidSuffix,
+  getDeviceProgress,
   getDeviceStage,
+  getDeviceTransport,
   resolveDiscoveryIdentity,
   type DeviceStage,
+  type DeviceProgressStep,
+  type DeviceProgressState,
+  type DeviceTransport,
   type DiscoveryEndpoint,
 } from '../utils/deviceStatus';
 
@@ -88,12 +94,82 @@ const LocationHealthMeta: React.FC<{
   const parts = age != null
     ? [t('connection.location_last_success_seconds', { n: age })]
     : [t('connection.location_last_success_none')];
+  if (health.last_location_success_unix != null) {
+    // Keep the relative age readable while exposing the real event time for
+    // operators comparing two phones during strict group recovery.
+    parts.push(formatHealthClock(health.last_location_success_unix));
+  }
   if (health.last_location_recovery_unix != null) {
     parts.push(t('connection.location_recovered', { time: formatHealthClock(health.last_location_recovery_unix) }));
   }
   return (
     <div className="device-location-meta" style={{ fontSize: 9, opacity: 0.64, marginTop: 2, lineHeight: 1.35 }}>
       {parts.join(' · ')}
+    </div>
+  );
+};
+
+const DEVICE_PROGRESS_STEPS: DeviceProgressStep[] = ['exploring', 'tunnel', 'gps', 'recovery'];
+const DEVICE_PROGRESS_GLYPHS: Record<DeviceProgressState, string> = {
+  complete: '✓',
+  active: '•',
+  pending: '·',
+  unverified: '?',
+  blocked: '!',
+  not_applicable: '—',
+};
+const DEVICE_PROGRESS_COLORS: Record<DeviceProgressState, string> = {
+  complete: '#4ecdc4',
+  active: '#ffb627',
+  pending: 'rgba(255,255,255,0.46)',
+  unverified: '#858b9a',
+  blocked: '#ef7777',
+  not_applicable: 'rgba(255,255,255,0.36)',
+};
+
+/** Compact, evidence-backed stage trail for one device in the group roster. */
+const DeviceProgressStrip: React.FC<{
+  stage: DeviceStage;
+  transport: DeviceTransport;
+}> = ({ stage, transport }) => {
+  const t = useT();
+  const progress = getDeviceProgress(stage, transport);
+  const labelFor = (step: DeviceProgressStep, state: DeviceProgressState): string => {
+    if (step === 'exploring') return t('group.device_exploring');
+    if (step === 'tunnel') return t('group.device_tunnel');
+    if (step === 'gps') return state === 'complete'
+      ? t('group.device_gps_ready')
+      : t('group.device_gps_waiting');
+    return t('group.device_recovering');
+  };
+
+  return (
+    <div
+      className="device-progress-strip"
+      aria-label={`device progress: ${stage}`}
+      style={{ display: 'flex', alignItems: 'center', gap: 3, margin: '4px 0 1px 30px', minWidth: 0 }}
+    >
+      {DEVICE_PROGRESS_STEPS.map((step, index) => {
+        const state = progress[step];
+        const label = labelFor(step, state);
+        return (
+          <React.Fragment key={step}>
+            {index > 0 && <span aria-hidden="true" style={{ color: 'rgba(255,255,255,0.28)', fontSize: 9 }}>›</span>}
+            <span
+              className={`device-progress-step progress-${state}`}
+              title={`${label} · ${state}`}
+              style={{
+                display: 'inline-flex', alignItems: 'center', gap: 2, minWidth: 0,
+                color: DEVICE_PROGRESS_COLORS[state], fontSize: 9, lineHeight: 1.25,
+                opacity: state === 'unverified' || state === 'not_applicable' ? 0.78 : 1,
+              }}
+            >
+              <span aria-hidden="true" style={{ fontWeight: 700 }}>{DEVICE_PROGRESS_GLYPHS[state]}</span>
+              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{label}</span>
+            </span>
+          </React.Fragment>
+        );
+      })}
     </div>
   );
 };
@@ -214,7 +290,7 @@ const ConnectionHealthCard: React.FC<{ health: ConnectionHealth; isWifi?: boolea
             <span style={{ width: `${Math.min(100, ((health.stable_samples ?? 0) / Math.max(1, health.required_samples ?? 3)) * 100)}%` }} />
           </span>
         )}
-        <LocationHealthMeta health={health} now={now} />
+        <LocationHealthMeta health={health} now={now} showEmpty />
       </span>
     </div>
   );
@@ -240,6 +316,7 @@ const DeviceStatus: React.FC<DeviceStatusProps> = ({
   wifiReconnects = {},
 }) => {
   const t = useT();
+  const unverifiedLabel = t('diagnostics.not_verified');
   const [showDropdown, setShowDropdown] = useState(false);
   const [now, setNow] = useState(() => Date.now());
   React.useEffect(() => {
@@ -331,11 +408,57 @@ const DeviceStatus: React.FC<DeviceStatusProps> = ({
   // health card is not enough to explain why 1/2 or 2/2 phones can receive a
   // GPS update. This compact roster surfaces paired/connected/tunnel/GPS
   // state for every known device without changing any backend semantics.
-  const groupDevices = devices.slice(0, 3);
+  //
+  // A recovery event can arrive before listDevices() rediscovers the missing
+  // phone. Include the backend's real group member/missing UDIDs as read-only
+  // placeholders so the summary still says which member is absent. A
+  // placeholder never supplies health, transport, IP, or GPS evidence.
+  const syncMembers = groupSyncStatus?.members ?? [];
+  const syncMemberByUdid = new Map(
+    syncMembers
+      .filter((member) => member && typeof member.udid === 'string')
+      .map((member) => [canonicalUdid(member.udid), member]),
+  );
+  const groupDeviceList = devices.slice(0, PRODUCT_MAX_TUNNEL_DEVICES);
+  const groupDeviceKeys = new Set(groupDeviceList.map((item) => canonicalUdid(item.id)));
+  const syncRosterUdids = [
+    ...syncMembers.map((member) => member.udid),
+    ...(groupSyncStatus?.missing_udids ?? []),
+    ...(groupSyncStatus?.lost_udids ?? []),
+  ];
+  for (const udid of syncRosterUdids) {
+    const key = canonicalUdid(udid);
+    if (!key || groupDeviceKeys.has(key) || groupDeviceList.length >= PRODUCT_MAX_TUNNEL_DEVICES) continue;
+    const member = syncMemberByUdid.get(key);
+    const suffix = formatUdidSuffix(udid);
+    groupDeviceList.push({
+      id: udid,
+      name: suffix ? `UDID ···${suffix}` : 'UDID',
+      iosVersion: '',
+      connectionType: undefined,
+      isConnected: member?.connected === true,
+    });
+    groupDeviceKeys.add(key);
+  }
+  const groupDevices = groupDeviceList;
   const tunnelByUdid = new Map(tunnels.map((tn) => [canonicalUdid(tn.udid), tn]));
   const healthByUdid = new Map(connectionHealth.map((health) => [canonicalUdid(health.udid), health]));
   const healthFor = (item: Device) => healthByUdid.get(canonicalUdid(item.id));
   const tunnelFor = (item: Device) => tunnelByUdid.get(canonicalUdid(item.id));
+  const reconnectFor = (item: Device) => wifiReconnects[canonicalUdid(item.id)];
+  const savedWifiIpFor = (item: Device): string | null => {
+    const key = canonicalUdid(item.id);
+    const entry = savedIps.find((candidate) => candidate.udid && canonicalUdid(candidate.udid) === key);
+    return entry?.ip || null;
+  };
+  const transportFor = (item: Device): DeviceTransport => getDeviceTransport(
+    item.connectionType,
+    Boolean(tunnelFor(item)),
+  );
+  const wifiIpFor = (item: Device): string | null => {
+    const reconnectIp = reconnectFor(item)?.ip?.trim();
+    return reconnectIp || savedWifiIpFor(item);
+  };
   const isDeviceConnected = (item: Device) => {
     const health = healthFor(item);
     return item.isConnected === true
@@ -351,7 +474,28 @@ const DeviceStatus: React.FC<DeviceStatusProps> = ({
     hasTunnel: tunnelByUdid.has(canonicalUdid(item.id)),
     health: healthFor(item),
   });
-  const isDeviceReady = (item: Device) => connectionStage(item) === 'gps';
+  const isGroupMissing = (item: Device) => {
+    const key = canonicalUdid(item.id);
+    const member = syncMemberByUdid.get(key);
+    return (groupSyncStatus?.missing_udids ?? []).some((udid) => canonicalUdid(udid) === key)
+      || (groupSyncStatus?.lost_udids ?? []).some((udid) => canonicalUdid(udid) === key)
+      || member?.lost === true;
+  };
+  const isGroupDegraded = (item: Device) => {
+    const key = canonicalUdid(item.id);
+    const member = syncMemberByUdid.get(key);
+    return (groupSyncStatus?.degraded_udids ?? []).some((udid) => canonicalUdid(udid) === key)
+      || member?.degraded === true;
+  };
+  const displayStage = (item: Device): DeviceStage => {
+    if (isGroupMissing(item)) return 'offline';
+    // `degraded` is emitted by the strict-sync coordinator when a member is
+    // not safe to receive the next GPS update. It is a real recovery signal,
+    // but it must not count as GPS-ready without a healthy location event.
+    if (isGroupDegraded(item)) return 'recovering';
+    return connectionStage(item);
+  };
+  const isDeviceReady = (item: Device) => connectionStage(item) === 'gps' && !isGroupMissing(item) && !isGroupDegraded(item);
   const stageLabel = (stage: DeviceStage) => ({
     paired: t('group.device_paired'),
     exploring: t('group.device_exploring'),
@@ -374,7 +518,31 @@ const DeviceStatus: React.FC<DeviceStatusProps> = ({
     if (status.stage === 'failed') return t('wifi.reconnect_retrying');
     return null;
   };
-  const readyCount = countGpsReady(groupDevices, connectionStage);
+  const readyCount = countGpsReady(groupDevices, displayStage);
+
+  const groupTotal = Math.max(
+    groupDevices.length,
+    Number(groupSyncStatus?.expected_count) > 0 ? Number(groupSyncStatus?.expected_count) : 0,
+  );
+  const syncMaxFromStatus = Number(groupSyncStatus?.max_ack_delta_ms);
+  const syncLastFromStatus = Number(groupSyncStatus?.last_ack_delta_ms);
+  const syncDeltaMs = groupMaxAckDeltaMs > 0
+    ? groupMaxAckDeltaMs
+    : Number.isFinite(syncMaxFromStatus) && syncMaxFromStatus >= 0
+      ? syncMaxFromStatus
+      : Number.isFinite(syncLastFromStatus) && syncLastFromStatus >= 0
+        ? syncLastFromStatus
+        : null;
+  const syncDeltaKnown = syncDeltaMs != null;
+  const syncMissingUdids = Array.from(new Set([
+    ...(groupSyncStatus?.missing_udids ?? []),
+    ...(groupSyncStatus?.lost_udids ?? []),
+  ].map(canonicalUdid).filter(Boolean)));
+  const syncMissingLabels = syncMissingUdids.map((udid) => {
+    const known = groupDevices.find((item) => canonicalUdid(item.id) === udid);
+    return known?.name || `UDID ···${formatUdidSuffix(udid)}`;
+  });
+  const unidentifiedMissingCount = Math.max(0, groupTotal - groupDevices.length - syncMissingLabels.length);
 
   const handleRepair = async () => {
     setRepairState('running');
@@ -466,10 +634,10 @@ const DeviceStatus: React.FC<DeviceStatusProps> = ({
   return (
     <div className={`device-status ${isConnected ? 'device-connected' : 'device-disconnected'}`}>
       {displayedHealth && <ConnectionHealthCard health={displayedHealth} isWifi={device?.connectionType === 'Network'} />}
-      {groupDevices.length > 1 && (
+      {(groupDevices.length > 1 || groupTotal > 1) && (
         <div
           className="connection-group-summary"
-          aria-label={t('group.connection_summary', { ready: readyCount, total: groupDevices.length })}
+          aria-label={t('group.connection_summary', { ready: readyCount, total: groupTotal })}
           style={{
             marginBottom: 8, padding: '7px 9px', borderRadius: 6,
             border: '1px solid rgba(108, 140, 255, 0.22)',
@@ -477,31 +645,52 @@ const DeviceStatus: React.FC<DeviceStatusProps> = ({
           }}
         >
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 5 }}>
-            <strong style={{ fontSize: 11 }}>{t('group.connection_summary', { ready: readyCount, total: groupDevices.length })}</strong>
+            <strong style={{ fontSize: 11 }}>{t('group.connection_summary', { ready: readyCount, total: groupTotal })}</strong>
             <span style={{ fontSize: 10, opacity: 0.6 }}>{tunnelLimit} max</span>
           </div>
           {groupSyncStatus && ['paused', 'recovering', 'recovery_failed'].includes(groupSyncStatus.status) && (
-            <div className="group-sync-recovery" style={{ marginBottom: 5, fontSize: 10, color: '#ffb627' }}>
+            <div
+              className="group-sync-recovery"
+              style={{ marginBottom: 5, fontSize: 10, color: groupSyncStatus.status === 'recovery_failed' ? '#ef7777' : '#ffb627' }}
+            >
               {t('group.reconnecting', {
-                ready: groupSyncStatus.ready_count ?? 0,
-                total: groupSyncStatus.expected_count ?? groupSyncStatus.total ?? groupDevices.length,
+                ready: groupSyncStatus.ready_count ?? readyCount,
+                total: groupSyncStatus.expected_count ?? groupSyncStatus.total ?? groupTotal,
                 attempt: groupSyncStatus.attempt ?? 1,
                 max: groupSyncStatus.max_attempts ?? 3,
               })}
             </div>
           )}
-          {groupMaxAckDeltaMs > 0 && (
-            <div className="group-sync-skew" style={{ marginBottom: 5, fontSize: 9, opacity: 0.64 }}>
-              {t('group.max_sync_delta', { ms: Math.round(groupMaxAckDeltaMs) })}
+          {syncMissingLabels.length > 0 && (
+            <div className="group-sync-missing" style={{ marginBottom: 5, fontSize: 10, color: '#ef7777' }}>
+              {t('group.device_offline')}: {syncMissingLabels.join(', ')}
             </div>
           )}
-            <div style={{ display: 'grid', gap: 3 }}>
+          {unidentifiedMissingCount > 0 && (
+            <div className="group-sync-missing-unverified" style={{ marginBottom: 5, fontSize: 10, color: '#858b9a' }}>
+              {t('group.device_offline')}: {unverifiedLabel} ({unidentifiedMissingCount})
+            </div>
+          )}
+          {(groupSyncStatus || groupMaxAckDeltaMs > 0) && (
+            <div className="group-sync-skew" style={{ marginBottom: 5, fontSize: 9, opacity: 0.64 }}>
+              {t('group.max_sync_delta', { ms: syncDeltaKnown ? Math.round(syncDeltaMs as number) : unverifiedLabel })}
+            </div>
+          )}
+          <div style={{ display: 'grid', gap: 3 }}>
             {groupDevices.map((item, index) => {
-              const stage = connectionStage(item);
+              const stage = displayStage(item);
               const ready = isDeviceReady(item);
               const health = healthFor(item);
-              const reconnect = wifiReconnects[canonicalUdid(item.id)];
+              const reconnect = reconnectFor(item);
               const reconnectText = reconnectLabel(reconnect);
+              const transport = transportFor(item);
+              const transportLabel = transport === 'usb'
+                ? 'USB'
+                : transport === 'wifi'
+                  ? 'Wi-Fi'
+                  : unverifiedLabel;
+              const wifiIp = wifiIpFor(item);
+              const tunnel = tunnelFor(item);
               const stageColor = stage === 'gps'
                 ? '#4ecdc4'
                 : stage === 'offline'
@@ -517,6 +706,17 @@ const DeviceStatus: React.FC<DeviceStatusProps> = ({
                     <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>{item.name || item.id.slice(0, 10)}</span>
                     <span style={{ opacity: ready ? 0.95 : 0.72, whiteSpace: 'nowrap', color: ready ? '#4ecdc4' : undefined }}>{stageLabel(stage)}</span>
                   </div>
+                  <div
+                    className="device-connection-meta"
+                    style={{ display: 'flex', flexWrap: 'wrap', gap: 5, marginLeft: 30, marginTop: 2, fontSize: 9, opacity: 0.64, lineHeight: 1.35 }}
+                  >
+                    <span>{transportLabel}</span>
+                    <span title={wifiIp ? undefined : `IP ${unverifiedLabel}`}>IP {wifiIp || unverifiedLabel}</span>
+                    {tunnel?.rsd_address && tunnel?.rsd_port != null && (
+                      <span style={{ fontFamily: 'monospace' }}>RSD {tunnel.rsd_address}:{tunnel.rsd_port}</span>
+                    )}
+                  </div>
+                  <DeviceProgressStrip stage={stage} transport={transport} />
                   {reconnectText && (
                     <div
                       className={`device-reconnect-stage reconnect-${reconnect?.stage}`}
@@ -531,7 +731,12 @@ const DeviceStatus: React.FC<DeviceStatusProps> = ({
                       {reconnectText}{(reconnect?.attempt ?? 0) > 1 ? ` · ${t('wifi.reconnect_attempt', { n: reconnect?.attempt ?? 1 })}` : ''}
                     </div>
                   )}
-                  <LocationHealthMeta health={health} now={now} showEmpty={stage !== 'paired'} />
+                  {reconnect?.error && (reconnect.stage === 'failed' || reconnect.stage === 'needs_usb_repair') && (
+                    <div style={{ marginLeft: 30, marginTop: 2, fontSize: 9, color: '#ef7777', overflowWrap: 'anywhere' }}>
+                      {reconnect.error}
+                    </div>
+                  )}
+                  <LocationHealthMeta health={health} now={now} showEmpty />
                 </div>
               );
             })}
@@ -553,6 +758,7 @@ const DeviceStatus: React.FC<DeviceStatusProps> = ({
             const iosMajor = Number.parseInt(String(device.iosVersion || '0').split('.')[0] || '0', 10);
             const showDdiRepair = !isWifi && Number.isFinite(iosMajor) && iosMajor >= 17;
             const activeTunnel = isWifi ? tunnelFor(device) : null;
+            const knownWifiIp = isWifi ? wifiIpFor(device) : null;
             const pinned = activeTunnel ? isPinnedUdid(device.id) : false;
             return (
               <>
@@ -566,14 +772,22 @@ const DeviceStatus: React.FC<DeviceStatusProps> = ({
                     background: isWifi ? 'rgba(76, 175, 80, 0.15)' : 'rgba(108, 140, 255, 0.15)',
                     color: isWifi ? '#4caf50' : '#6c8cff',
                   }}>
-                    {isWifi ? 'WiFi' : 'USB'}
+                  {isWifi ? 'WiFi' : 'USB'}
                   </span>
+                  {isWifi && (
+                    <span style={{ fontFamily: 'monospace', fontSize: 10, opacity: knownWifiIp ? 0.75 : 0.58 }} title={knownWifiIp ? undefined : `IP ${unverifiedLabel}`}>
+                      IP {knownWifiIp || unverifiedLabel}
+                    </span>
+                  )}
                   {activeTunnel && (
                     <span style={{ fontFamily: 'monospace', fontSize: 10, opacity: 0.75 }}>
                       {activeTunnel.rsd_address}:{activeTunnel.rsd_port}
                     </span>
                   )}
                 </div>
+                {groupDevices.length <= 1 && (
+                  <DeviceProgressStrip stage={displayStage(device)} transport={transportFor(device)} />
+                )}
                 {activeTunnel && (
                   <div style={{ display: 'flex', gap: 4, marginTop: 5 }}>
                     {onTogglePin && (
@@ -682,6 +896,9 @@ const DeviceStatus: React.FC<DeviceStatusProps> = ({
           {tunnels.filter((tn) => canonicalUdid(tn.udid) !== canonicalUdid(device?.id)).map((tn) => {
             const dev = devices.find((d) => canonicalUdid(d.id) === canonicalUdid(tn.udid));
             const dispName = dev?.name || savedNameByUdid[canonicalUdid(tn.udid)] || tn.udid.slice(0, 12);
+            const knownIp = wifiReconnects[canonicalUdid(tn.udid)]?.ip
+              || savedIps.find((entry) => entry.udid && canonicalUdid(entry.udid) === canonicalUdid(tn.udid))?.ip
+              || null;
             const pinned = isPinnedUdid(tn.udid);
             return (
               <div key={tn.udid} style={{
@@ -699,6 +916,7 @@ const DeviceStatus: React.FC<DeviceStatusProps> = ({
                   <div style={{ fontSize: 11, opacity: 0.65, display: 'flex', gap: 4, alignItems: 'center', flexWrap: 'wrap', marginTop: 3 }}>
                     {dev?.iosVersion && <span>iOS {dev.iosVersion}</span>}
                     <span style={{ padding: '1px 6px', borderRadius: 3, background: 'rgba(76, 175, 80, 0.15)', color: '#4caf50', fontSize: 11 }}>WiFi</span>
+                    <span style={{ fontFamily: 'monospace', fontSize: 10, opacity: knownIp ? 0.75 : 0.58 }} title={knownIp ? undefined : `IP ${unverifiedLabel}`}>IP {knownIp || unverifiedLabel}</span>
                     <span style={{ fontFamily: 'monospace', fontSize: 10, opacity: 0.75 }}>{tn.rsd_address}:{tn.rsd_port}</span>
                   </div>
                   <div style={{ display: 'flex', gap: 4, marginTop: 5 }}>
